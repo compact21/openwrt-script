@@ -1,0 +1,9 @@
+#!/bin/sh
+
+# Status all led
+echo "/sys/class/leds/green:power/brightness $(cat /sys/class/leds/green:power/brightness)"
+echo "/sys/class/leds/red:info/brightness $(cat /sys/class/leds/red:info/brightness)"
+echo "/sys/class/leds/green:lan/brightness $(cat /sys/class/leds/green:lan/brightness)"
+echo "/sys/class/leds/green:wlan/brightness $(cat /sys/class/leds/green:wlan/brightness)"
+echo "/sys/class/leds/amber:info/brightness $(cat /sys/class/leds/amber:info/brightness)"
+echo "/sys/class/leds/green:wan/brightness $(cat /sys/class/leds/green:wan/brightness)"
