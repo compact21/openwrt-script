@@ -1,0 +1,8 @@
+#!/bin/sh
+ping -c 1 8.8.8.8
+if [ $? = "0" ]; then
+#        logger "exec: ping -c 1 8.8.8.8 ok"
+        echo "ok"
+else
+        logger "exec: ping -c 1 8.8.8.8 ERROR"
+fi
