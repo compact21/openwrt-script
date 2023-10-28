@@ -1,0 +1,2 @@
+#! /bin/sh
+dmesg -c; /etc/init.d/log restart
