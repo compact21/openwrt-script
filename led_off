@@ -1,0 +1,9 @@
+#!/bin/sh
+
+# Turn off all led
+echo 0 > /sys/class/leds/green:power/brightness
+echo 0 > /sys/class/leds/red:info/brightness
+#echo 0 > /sys/class/leds/green:lan/brightness
+#echo 0 > /sys/class/leds/green:wlan/brightness
+echo 0 > /sys/class/leds/amber:info/brightness
+echo 0 > /sys/class/leds/green:wan/brightness
