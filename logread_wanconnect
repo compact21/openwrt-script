@@ -1,0 +1,2 @@
+#!/bin/sh
+logread | grep -E "wan_connect|wan2_connect|ipaddress|connection_reset|ping_check"; date
