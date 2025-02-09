@@ -1,0 +1,14 @@
+#!/bin/sh
+echo "date=\"$(date)\""
+echo "uptime=\"$(uptime -s)\""
+echo
+echo "You are scheduling a reboot at 4:00,"
+echo "attention lose the information saved into log files"
+echo
+read -n1 -p "proceed with a reboot at 4:00 [y,n] " question
+if [ ${question} == "y" ]; then
+echo "reboot" | at 4:00
+else
+echo
+echo "You have chosen to cancel the procedure."
+fi
