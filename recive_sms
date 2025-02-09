@@ -1,0 +1,26 @@
+#!/bin/sh
+LTEPROTO=$(cat /etc/config/network | grep -E "proto 'qmi'|proto 'mbim'|proto 'dhcp'" | wc -l)
+if [ ${LTEPROTO} -eq "1" ]; then
+sms_tool -d /dev/ttyUSB2 -s SM status
+sms_tool -d /dev/ttyUSB2 -s ME status
+sms_tool -d /dev/ttyUSB2 -s SR status
+sms_tool -d /dev/ttyUSB2 -s MT status
+sms_tool -d /dev/ttyUSB2 recv
+read -n1 -p "you want to delete all SMS [y,n] " question
+if [ ${question} == "y" ]; then
+echo
+echo "delete all SMS"
+sms_tool -d /dev/ttyUSB2 delete all >/dev/null 2>&1
+#echo 0 > /sys/class/leds/green:voice/brightness
+else
+echo
+echo "no delete SMS"
+fi
+
+#uqmi -d /dev/cdc-wdm0 --list-messages
+#uqmi -d /dev/cdc-wdm0 --list-messages --storage me
+#uqmi -d /dev/cdc-wdm0 --get-message 0
+#uqmi -d /dev/cdc-wdm0 --get-message 0 --storage me
+#uqmi -d /dev/cdc-wdm0 --delete-message 0
+#uqmi -d /dev/cdc-wdm0 --delete-message 0 --storage me
+fi
