@@ -1,0 +1,31 @@
+#!/bin/sh
+
+# from 600 sec form boot not exec
+if [ $(awk -F "." '{print $1}' /proc/uptime) -lt "600" ]; then
+exit 0
+fi
+
+# if proto=mbim then it proceeds otherwise it does nothing
+LTEPROTO=$(cat /etc/config/network | grep "proto 'mbim'" | wc -l)
+if [ ${LTEPROTO} -eq "1" ]; then
+
+
+    LTESTATUS=$(uqmi -m -d /dev/cdc-wdm0 -t 20000 --get-data-status)
+    LTEERROR=$?
+    LTEFIND=$(echo ${LTESTATUS} | grep "\"connected\"" | wc -l)
+
+    if [ ${LTEERROR} -ne 0 ]; then
+    logger "exec /root/wan2_connect: uqmi not response into 20 sec exec ifdown wan; ifup wan"
+    ifdown wan
+    ifup wan
+    exit 0
+    fi
+
+    if [ ${LTEFIND} -eq "0" ]; then
+    logger "exec /root/wan2_connect: lost connection detected exec ifdown wan; ifup wan"
+    ifdown wan
+    ifup wan
+    #usbreset 2c7c:0512
+    fi
+
+fi
