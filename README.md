@@ -1,0 +1,1 @@
+Semplici script per Openwrt
