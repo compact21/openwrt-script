@@ -1,1 +1,1 @@
-Semplici script per Openwrt
+Simple scripts for Openwrt
