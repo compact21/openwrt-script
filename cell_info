@@ -4,6 +4,7 @@ LTEPROTO=$(cat /etc/config/network | grep -E "proto 'qmi'|proto 'mbim'|proto 'dh
 if [ ${LTEPROTO} -eq "1" ]; then
 file1=$(mktemp)
 
+ping -W 2 -c 1 9.9.9.9 > /dev/null 2>&1
 picocom -t "$(echo -ne 'AT+QENG="servingcell"\r\n')" /dev/ttyUSB2 --nolock --exit-after 300 --quiet --logfile $file1 >/dev/null
 cellinfo=$(cat $file1 | awk 'FNR == 2 {print}' | awk -F "," '{print $7}' | cut -c -5 | awk '{ printf "%d\n", "0x" $1 }')
 echo $cellinfo
