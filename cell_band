@@ -1,5 +1,5 @@
 #!/bin/sh
-LTEPROTO=$(cat /etc/config/network | grep -E "proto 'qmi'|proto 'mbim'|proto 'dhcp'" | wc -l)
+LTEPROTO=$(cat /etc/config/network | grep -E "proto 'qmi'|proto 'mbim'" | wc -l)
 if [ ${LTEPROTO} -eq "1" ]; then
 file1=$(mktemp)
 
