@@ -40,7 +40,7 @@ exit 0
 fi
 
 LTEPROTO=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
-if [ ${LTEPROTO} -eq "0" ]; then
+if [ "$LTEPROTO" -eq "0" ]; then
 #string=$(echo -ne "$1\r\n")
 #echo $string
 #FILE=$(mktemp)
