@@ -1,6 +1,20 @@
 #!/bin/sh
-if [ $# -ne 1 ]; then
-echo "atcmd at_command"
+#set -x
+
+LTEPROTO=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
+if [ "$LTEPROTO" -eq "1" ]; then
+printf "Script not compatible with \"ModemManager\"\n"; exit 1
+fi
+
+atcmd_block_file="/tmp/atcmd_block"; # from /root/watchdog_mbim
+if [ -f "$atcmd_block_file" ]; then
+printf "\nI can't give at commands the file %s exists\n" "$atcmd_block_file"; exit 2
+fi
+
+if [ $# -eq "0" ]; then
+echo "atcmd 'at_command'                                                                 example atcmd 'AT+CSQ'"
+echo "atcmd 'at_command' delaytime(msec)=default 300                                     example atcmd 'ATI' 2000"
+echo "atcmd 'at_command' delaytime(msec) /tmp/atcmd/file-save (only /tmp/atcmd dir)      esample atcmd 'AT+QCAINFO' /tmp/atcmd/prova"
 echo
 echo "* * * * * * WARNING * * * * * *"
 echo "be careful what you do if you don't know what is being done don't do anything"
@@ -18,7 +32,7 @@ echo "atcmd 'AT+QENG=\"servingcell\"'"
 echo "atcmd 'AT+QENG=\"neighbourcell\"'"
 echo "atcmd 'AT+QNETINFO=\"servingcell\"'"
 echo "atcmd 'AT+CPMS?'; # show actual storage SMS"
-echo "atcmd 'AT+CPMS=\"ME\",\"ME\",\"ME\"'; # set storage SMS to ME (good)"
+echo "atcmd 'AT+CPMS=\"ME\",\"ME\",\"ME\"'; atcmd 'AT+CSAS'; # set and save storage SMS to ME (good)"
 echo "atcmd 'AT+QCFG=\"rrc\",4'; # set 5 to default test 4 to problems"
 echo "atcmd 'AT+QCFG=\"pcmclk\",1'; # set 0 to default test 1"
 echo "atcmd 'AT+QCFG=\"band\",0,45,1'; # band only 1+3+7"
@@ -28,28 +42,51 @@ echo "atcmd 'AT+QCFG=\"nwscanmodeex\"'; # set 63 and default output 24 correct"
 echo "atcmd 'AT+QCFG=\"band\",8d0,1A0080800D5'; # all bands supported eg18-eu"
 echo "atcmd 'AT+QCFG=\"call_control\",1,1'; # disable voice call"
 echo "atcmd 'AT+QNWLOCK=\"common/4g\",0'; # disable cell-lock"
-echo "atcmd 'AT+QNWLOCK=\"common/4g\",1,1650,65'; # Monte Bondone Cima Palon 230131"
-echo
-echo "* * * * * * WARNING * * * * * *"
-echo "be careful what you do if you don't know what is being done don't do anything"
-echo "* * * * * * WARNING * * * * * *"
+echo "atcmd 'AT+QNWLOCK=\"common/4g\"'; # show current cell-lock"
+echo "atcmd 'AT+QNWLOCK=\"common/4g\",1,1650,100'; # Monte Bondone Cima Palon 230131 or 231131"
 echo
 echo "current_date $(date)"
-echo
 exit 0
 fi
 
-LTEPROTO=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
-if [ "$LTEPROTO" -eq "0" ]; then
-#string=$(echo -ne "$1\r\n")
-#echo $string
-#FILE=$(mktemp)
-picocom /dev/ttyUSB2 --exit-after 300 --quiet -t $(echo -ne "$1\r\n")
-# --logfile ${FILE}
-#cat $FILE
-#rm $FILE
-#echo "$1" | socat - OPEN:/dev/ttyUSB2,crnl,ignoreeof > /tmp/at-command 2>&1
+if [ $# -ge "1" ]; then
+#example: picocom /dev/ttyUSB2 --exit-after 2000 --quiet -t $(echo -ne "AT+QCAINFO\r\n") --logfile /tmp/prova
+#atcommand=$(echo -ne "$1\r\n")
+atcommand=$(printf "$1\r\n")
+fi
+
+if [ $# -ge "2" ]; then
+delaytime=$2
 else
-echo "Script not compatible with \"ModemManager\""
-exit 1
+delaytime="300"
+fi
+
+if [ $# -ge "3" ]; then
+pathfile=$(dirname "$3")
+savefile=$3
+if [ "$pathfile" = "/tmp/atcmd" ]; then
+        if [ ! -f "$savefile" ]; then
+        touch "$savefile"
+        fi
+else
+        printf "\nwarning file-save '%s' not in '/tmp/atcmd/'\n" "$3"; exit 3
+        fi
+fi
+
+file1=$(mktemp)
+picocom /dev/ttyUSB2 --exit-after "$delaytime" --quiet -t "$atcommand" --logfile "$file1" > /dev/null
+string=$(cat "$file1" | grep -c "OK")
+if [ "$string" -eq "1" ]; then
+        if [ $# -eq "3" ]; then
+                logger "exec: /root/atcmd '$1' --exit-after '$delaytime' --save-file '$3'"
+                echo "$(date)" >> "$savefile"; cat "$file1" >> "$savefile"; rm "$file1"
+        else
+                logger "exec: /root/atcmd '$1' --exit-after '$delaytime'"
+                cat "$file1"; rm "$file1"
+        fi
+else
+printf "\nfail send '%s'" "$atcommand"
+cat "$file1"
+rm "$file1"
+exit 4
 fi
