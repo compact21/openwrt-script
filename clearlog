@@ -1,0 +1,5 @@
+#!/bin/sh
+dmesg -c
+/etc/init.d/log restart
+sleep 1
+logger "exec: /root/clearlog $(date)"
