@@ -1,0 +1,20 @@
+#!/bin/sh
+# extract ip address from modem at command
+lteproto=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
+if [ "$lteproto" -eq "0" ]; then
+file1=$(mktemp)
+picocom -t "$(printf 'AT+CGPADDR=1\r\n')" /dev/ttyUSB2 --nolock --exit-after 300 --quiet --logfile "$file1" > /dev/null
+string=$(cat "$file1" | grep -o '[0-9]\+[.][0-9]\+[.][0-9]\+[.][0-9]\+')
+# if ip address is not zero
+if [ ! -z "$string" ]; then
+printf "$string\n"
+rm "$file1"
+else
+printf "fail extract ip address\n"
+cat "$file1"
+rm "$file1"
+exit 1
+fi
+else
+echo "Script not compatible with \"ModemManager\""
+exit 1
