@@ -1,0 +1,12 @@
+#! /bin/sh
+lteproto=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
+if [ "$lteproto" -eq "0" ]; then
+file1=$(mktemp)
+picocom /dev/ttyUSB2 -x 2000 -q -t $(printf "AT+QNWLOCK=\"common/4g\"\r\n") --logfile "$file1" > /dev/null
+string=$(cat "$file1" | grep "+QNWLOCK:")
+printf "$string\n"
+rm "$file1"
+else
+printf "Script not compatible with \"ModemManager\"\n"
+exit 1
+fi
