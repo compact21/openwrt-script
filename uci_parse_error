@@ -1,0 +1,2 @@
+#!/bin/sh
+for x in /etc/config/*; do uci show "${x##*/}" >/dev/null || echo "$x is broken"; done
