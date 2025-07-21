@@ -1,0 +1,62 @@
+#!/bin/sh
+#set -x
+
+send_at_command(){
+lteproto=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
+if [ "$lteproto" -eq "0" ]; then
+    if [ $# -eq 1 ]; then
+    atcommand=$(printf "$1\r\n")
+    printf "you want send '$1' you modem [y,n]\n"; read -r question
+        if [ "$question" = "y" ]; then
+        file1=$(mktemp)
+        picocom -t "$atcommand" /dev/ttyUSB2 --nolock --exit-after 300 --quiet --logfile "$file1" > /dev/null
+        string=$(cat "$file1" | grep -c "OK")
+            if [ "$string" -eq "1" ]; then
+            rm "$file1"; printf "\nsend '$1' good\n"
+            else
+            printf "\nfail send '$1'\n"; cat "$file1";# rm "$file1"; exit 4
+            fi
+        else
+        printf "\nexit without doing anything\n"
+        exit 1
+        fi
+    fi
+else
+printf "\nScript not compatible with \"ModemManager\"\n"
+exit 3
+fi
+}
+
+down_wan(){
+printf "you want exec \"ifdown wan\" [y,n]\n"; read -r question
+if [ "$question" = "y" ]; then
+    printf "\nexec: ifdown wan\n"; logger "exec: /root/connection_reset: ifdown wan"; ifdown wan
+else
+    printf "\nexit without doing anything\n"; exit 1
+fi
+}
+
+usb_reset(){
+printf "you want exec \"usbreset 2c7c:0512\" [y,n]\n"; read -r question
+if [ "$question" = "y" ]; then
+    printf "\nexec: usbreset 2c7c:0512\n"; logger "exec: /root/connection_reset: usbreset 2c7c:0512"; usbreset 2c7c:0512
+else
+    printf "\nexit without doing anything\n"; exit 1
+fi
+}
+
+printf "select the operation:\n"
+printf "  1) ifdown wan (this is the correct way to restart the interface)\n"
+printf "  2) send 'AT+CFUN=1,1' to modem (Reset LTE module)\n"
+printf "  3) send 'AT+QNWLOCK=\"common/4g\",0' to modem for unset cell-lock\n"
+printf "  4) send 'AT+QNWLOCK=\"common/4g\",1,1650,65' to modem set a cell-lcok\n"
+printf "  5) usbreset 2c7c:0512 reset usb (disconnect LTE module)\n"
+read -r n
+case $n in
+  1) down_wan ;;
+  2) send_at_command 'AT+CFUN=1,1' ;;
+  3) send_at_command 'AT+QNWLOCK="common/4g",0' ;;
+  4) send_at_command 'AT+QNWLOCK="common/4g",1,1650,65' ;;
+  4) usb_reset ;;
+  *) printf "invalid option\n"; exit 1;;
+esac
