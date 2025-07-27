@@ -57,6 +57,6 @@ case $n in
   2) send_at_command 'AT+CFUN=1,1' ;;
   3) send_at_command 'AT+QNWLOCK="common/4g",0' ;;
   4) send_at_command 'AT+QNWLOCK="common/4g",1,1650,65' ;;
-  4) usb_reset ;;
+  5) usb_reset ;;
   *) printf "invalid option\n"; exit 1;;
 esac
