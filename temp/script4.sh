@@ -6,7 +6,7 @@
 #
 # cat /etc/crontabs/root
 # * * * * * /home/root/script4.sh
-# * * * * * flock -n /tmp/script4.lock /home/root/script4.sh
+# * * * * * flock -n /tmp/script3.lock /home/root/script3.sh
 #
 
 if [ ! -f /tmp/script4.lock ]; then
