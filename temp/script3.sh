@@ -6,6 +6,11 @@
 # cat /etc/crontabs/root
 # */6 * * * * /home/root/script3.sh
 
+# for 600 sec from boot not exec nothing
+if [ $(awk -F "." '{print $1}' /proc/uptime) -lt "600" ]; then
+exit 0
+fi
+
 ping -c 1 -W 1 8.8.8.8
 if [ $? -ne "0" ]; then
     sleep 2
