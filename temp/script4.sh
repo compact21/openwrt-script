@@ -9,6 +9,11 @@
 # * * * * * flock -n /tmp/script3.lock /home/root/script3.sh
 #
 
+# for 600 sec from boot not exec nothing
+if [ $(awk -F "." '{print $1}' /proc/uptime) -lt "600" ]; then
+exit 0
+fi
+
 if [ ! -f /tmp/script4.lock ]; then
   ping -c 1 -W 1 8.8.8.8
   if [ $? -ne "0" ]; then
