@@ -1,9 +1,9 @@
 #!/bin/sh
 # interval greater than the sum of the sleeps = 302 seconds
 #
-# if you want to run it with a crontab add this line into /etc/crontabs/root
+# if you want to run it with a crontab add this line into /etc/crontab.x/root
 #
-# cat /etc/crontabs/root
+# cat /etc/crontab.x/root
 # */6 * * * * /home/root/script3.sh
 
 # for 600 sec from boot not exec nothing
