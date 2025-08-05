@@ -1,11 +1,10 @@
 #!/bin/sh
 
-LTEPROTO=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
-if [ "$LTEPROTO" -eq "0" ]; then
+lteproto=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
+if [ "$lteproto" -eq "0" ]; then
 file1=$(mktemp)
-#enode_cell_id=$(uqmi -m -d /dev/cdc-wdm0 -t 20000 --get-system-info | grep "enodeb_id" | grep -E -o "[0-9]+")
 ping -W 2 -c 1 9.9.9.9 > /dev/null 2>&1
-picocom -t "$(echo -ne 'AT+QENG="servingcell"\r\n')" /dev/ttyUSB2 --nolock --exit-after 300 --quiet --logfile "$file1" >/dev/null
+picocom -t "$(printf 'AT+QENG="servingcell"\r\n')" /dev/ttyUSB2 --nolock --exit-after 300 --quiet --logfile "$file1" > /dev/null
 cellinfo=$(cat "$file1" | awk 'FNR == 2 {print}' | awk -F "," '{print $7}' | cut -c -5 | awk '{ printf "%d\n", "0x" $1 }')
 echo "$cellinfo"
 rm "$file1"
