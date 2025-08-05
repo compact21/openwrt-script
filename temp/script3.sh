@@ -17,6 +17,7 @@ if [ $? -ne "0" ]; then
     sleep 2
     ping -c 1 -W 1 1.1.1.1
     if [ $? -ne "0" ]; then
+    logger "exec: /home/root/script3.sh \"sys resetcm\""
     sys resetcm
     sleep 300
     fi
