@@ -11,8 +11,9 @@ if [ "$statuptime" -lt "600" ]; then
 exit 0
 fi
 
-# run /home/root/scritp3.sh at 3:00 prevent exectution this script
+# prevent exectution this script, actual run /home/root/scritp3.sh at 3:00
 if [ -f /tmp/script3.lock ]; then
+logger "warning I can't do anything because I'm already doing it /home/root/script3.sh"
 exit 0
 fi
 
