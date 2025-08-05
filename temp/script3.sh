@@ -14,6 +14,5 @@ fi
 logger "exec: /home/root/script3.sh \"sys resetcm\""
 touch /tmp/script3.lock
 sys resetcm
-rm /tmp/script3.lock
 sleep 300
 rm /tmp/script3.lock
