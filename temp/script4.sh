@@ -3,7 +3,7 @@
 # if it runs with a crontab prevent it from being re-executed if file /tmp/script4.lock exists
 
 # cat /etc/crontab.x/root
-# * * * * * /home/root/script4.sh
+# */2 * * * * /home/root/script4.sh
 
 # for 600 sec from boot not exec nothing
 statuptime=$(cut -f1 -d. /proc/uptime)
