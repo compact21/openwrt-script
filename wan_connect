@@ -1,31 +1,20 @@
 #!/bin/sh
-
 # for 600 sec from boot not exec nothing
 statuptime=$(cut -f1 -d. /proc/uptime)
 if [ "$statuptime" -lt "600" ]; then
-exit 0
-fi
-
 # if proto=qmi then it proceeds otherwise it does nothing
-LTEPROTO=$(cat /etc/config/network | grep "proto 'qmi'" | wc -l)
-if [ ${LTEPROTO} -eq "1" ]; then
-
-    LTESTATUS=$(uqmi -d /dev/cdc-wdm0 -t 20000 --get-data-status)
-    LTEERROR=$?
-    LTEFIND=$(echo ${LTESTATUS} | grep "\"connected\"" | wc -l)
-
-    if [ ${LTEERROR} -ne 0 ]; then
-    logger "exec /root/wan_connect: uqmi not response into 20 sec exec ifdown wan; ifup wan"
-    ifdown wan
-    ifup wan
-    exit 0
+lteproto=$(cat /etc/config/network | grep -c "proto 'qmi'")
+    if [ "$lteproto" -eq "1" ]; then
+    ltestatus=$(uqmi -d /dev/cdc-wdm0 -t 20000 --get-data-status)
+    lteerror=$?
+    ltefind=$(echo ${ltestatus} | grep -c "\"connected\"")
+        if [ "$lteerror" -ne "0" ]; then
+        logger "exec: /root/wan_connect: uqmi not response into 20 sec exec ifdown wan; ifup wan"
+        ifdown wan && ifup wan
+        fi
+        if [ "$ltefind" -eq "0" ]; then
+        logger "exec: /root/wan_connect: lost connection detected exec ifdown wan; ifup wan"
+        ifdown wan &&   ifup wan
+        fi
     fi
-
-    if [ ${LTEFIND} -eq "0" ]; then
-    logger "exec /root/wan_connect: lost connection detected exec ifdown wan; ifup wan"
-    ifdown wan
-    ifup wan
-    #usbreset 2c7c:0512
-    fi
-
 fi
