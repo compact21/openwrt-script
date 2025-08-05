@@ -10,7 +10,8 @@
 #
 
 # for 600 sec from boot not exec nothing
-if [ $(awk -F "." '{print $1}' /proc/uptime) -lt "600" ]; then
+statuptime=$(cut -f1 -d. /proc/uptime)
+if [ "$statuptime" -lt "600" ]; then
 exit 0
 fi
 
