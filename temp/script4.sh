@@ -11,6 +11,11 @@ if [ "$statuptime" -lt "600" ]; then
 exit 0
 fi
 
+# run /home/root/scritp3.sh at 3:00 prevent exectution this script
+if [ -f /tmp/script3.lock ]; then
+exit 0
+fi
+
 if [ ! -f /tmp/script4.lock ]; then
   ping -c 1 -W 1 8.8.8.8
   if [ $? -ne "0" ]; then
