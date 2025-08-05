@@ -1,2 +1,2 @@
 #!/bin/sh
-logread | grep -E "wan_connect|wan2_connect|listpackages|connection_reset|watchdog_mbim"; echo; echo "current date $(date)"
+logread | grep -E "atcmd|crash|exec|wan_connect|wan2_connect|listpackages|connection_reset|watchdog"; echo; echo "current date $(date)"
