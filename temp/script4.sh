@@ -11,7 +11,7 @@ if [ "$statuptime" -lt "600" ]; then
 exit 0
 fi
 
-# prevent exectution this script, actual run /home/root/scritp3.sh at 3:00
+# prevent exectution this script, actual run /home/root/scritp3.sh at 2:00
 if [ -f /tmp/script3.lock ]; then
 logger "warning I can't do anything because I'm already doing it /home/root/script3.sh"
 exit 0
@@ -24,8 +24,9 @@ if [ ! -f /tmp/script4.lock ]; then
     ping -c 1 -W 1 1.1.1.1
       if [ $? -ne "0" ]; then
       touch /tmp/script4.lock
-      logger "exec: /home/root/script4.sh \"sys resetcm\""
-      sys resetcm
+      logger "exec: /home/root/script4.sh"
+      cfg cellwan_mapn edit --Index 1 --AP_ManualAPN 0
+      cfg cellwan_mapn edit --Index 1 --AP_ManualAPN 1
       sleep 300
       rm /tmp/script4.lock
       fi
