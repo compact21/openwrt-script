@@ -6,6 +6,7 @@ su una versione standard la directoy corretta sarebbe /root
 
 # attenzione il demone crontab si basa sulla directory /etc/crontab.x che non esiste
 cat /etc/init.d/crond.sh | grep "crontab.x"
+<br/>
 su una versione standard la directoy corretta sarebbe /etc/crontabs
 
 # download scritps
