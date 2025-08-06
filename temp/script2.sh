@@ -1,3 +1,10 @@
 #!/bin/sh
+
+# for 600 sec from boot not exec nothing
+statuptime=$(cut -f1 -d. /proc/uptime)
+if [ "$statuptime" -lt "600" ]; then
+exit 0
+fi
+
 touch /tmp/script2.lock
 sys resetcm > /tmp/script2.lock 2>&1
