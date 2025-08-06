@@ -1,7 +1,7 @@
 # /etc/crontab.x/root
 # min hour day month day-week command
 # 0-59 0-23 1-31 1-12 0-6(0=Sunday) exec
-#*/2 * * * * /home/root/script.sh
-#0 0 */3 * * /home/root/script2.sh
-0 3 * * * /home/root/script3.sh
+# */2 * * * * /home/root/script.sh
+# 0 0 */3 * * /home/root/script2.sh
+0 2 * * * /home/root/script3.sh
 */2 * * * * /home/root/scritp4.sh
