@@ -4,4 +4,4 @@
 # */2 * * * * /home/root/script.sh
 # 0 0 */3 * * /home/root/script2.sh
 0 2 * * * /home/root/script3.sh
-*/2 * * * * /home/root/scritp4.sh
+*/2 * * * * /home/root/script4.sh
