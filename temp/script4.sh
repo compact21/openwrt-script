@@ -11,7 +11,7 @@
 #exit 0
 #fi
 
-logger "exec /home/root/script4.sh"
+logger "exec: /home/root/script4.sh"
 
 # prevent exectution this script, actual run /home/root/scritp3.sh at 2:00
 if [ -f /tmp/script3.lock ]; then
