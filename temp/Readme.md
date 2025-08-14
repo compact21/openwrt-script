@@ -55,7 +55,7 @@ cat /etc/init.d/crond.sh | grep "crontab.x"
 <br/>
 su una versione standard la directoy corretta sarebbe /etc/crontabs
 
-# download scritps per la riconnessione internet
+# scritps per la riconnessione internet creati per un utente
 
 mi è stato chiesto di creare 2 script la cui funzione di sottofondo è la riconnessione internet
 <br/>
@@ -69,10 +69,10 @@ ogni 2 minuti esegui "script4.sh"
 in modo tale che se 2 ping verso due host diversi su internet falliscono provi a riconnettersi
 <br/>
 
+# download scritps per la riconnessione internet e impostare permessi di esecuzione
 
 ```
-curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script3.sh
-curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script4.sh
+curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script3.sh > script3.sh; curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script4.sh > script4.sh; chmod 755 script3.sh; chmod 755 script4.sh
 ```
 
 <br/>
@@ -81,27 +81,14 @@ se non funzionano oppure presentano problemi al massimo basta che mi fate sapere
 qualcosa però il debug dovrete farlo voi sul vostro router
 <br/>
 
-# renderli eseguibili
+# creazione directory crontab, creazione dell'elenco dei crontab
 
 ```
-chmod 755 script3.sh
-chmod 755 script4.sh
-```
-
-# creazione directory crontab
-
-```
-mkdir /etc/crontab.x
-```
-
-# creazione dell'elenco dei crontab
-
-```
-cd /etc/crontab.x
-curl -k https://github.com/compact21/openwrt-script/blob/main/temp/root
+mkdir /etc/crontab.x; cd /etc/crontab.x; curl -k https://github.com/compact21/openwrt-script/blob/main/temp/root > root
 ```
 
 # riavvio del servizio cron
+
 ```
 /etc/init.d/crond.sh restart
 ```
