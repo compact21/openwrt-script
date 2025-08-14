@@ -4,7 +4,12 @@ Attenzione personalmente sono passato ad Openwrt
 <br/>
 ho aggiunto/modificato questi script in base alle richieste di alcune persone che hanno mantenuto il firmware OEM,
 <br/>
-quindi non posso dare certezza assoluta se funzionano oppure presentano problemi al massimo basta che mi fate sapere qualcosa
+quindi non posso dare certezza assoluta se funzionano oppure presentano problemi
+<br/>
+al massimo basta che mi fate sapere qualcosa ma <b>non mi ritengo responsabile in alcun modo di possibili problemi</b>.
+<br/>
+https://forum.fibra.click/d/39114-aggiornamento-firmware-zyxel-lte5398-m904/1052
+<br/>
 
 Quando ero sul firmware OEM la prima versione può essere recurerata qui:
 <br/>
