@@ -1,6 +1,6 @@
 # Script per zyxel lte5398 m904 OEM firmware
 
-Attenzione personalemente sono passato ad Openwrt
+Attenzione personalmente sono passato ad Openwrt
 <br/>
 ho aggiunto/modificato questi script in base alle richieste di alcune persone che hanno mantenuto il firmware OEM,
 <br/>
