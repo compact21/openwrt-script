@@ -22,6 +22,17 @@ Da una vecchia documentazione mi risulta che non è presente il comando <b>wget<
 <b>Ripeto non posso dare certezza assoluta se funzionano oppure presentano problemi.</b>
 
 
+# attenzione il firwmare OEM è stato proggettato in questa maniera
+
+le partizioni sembrano montate in lettura e scrittura, ma riavviano il router si nota che eventuali file creati prima del "reboot"
+<br/>
+non sono più presenti quindi le partizioni non sono persistenti.
+<br/>
+
+il modulo LTE all'interno del router "EG18-EU" sul firmware OEM è gestito con la modalità "QMI"
+<br/>
+
+
 # attenzione la directory di root si trova in /home/root
 
 su una versione standard la directoy corretta sarebbe /root
