@@ -16,6 +16,7 @@ https://forum.fibra.click/d/39114-aggiornamento-firmware-zyxel-lte5398-m904/1041
 
 <br/>
 Da una vecchia documentazione mi risulta che non è presente il comando <b>wget</b> viene modificata la documentazione per l'utilizzo di <b>curl</b>
+<br/>
 
 <br/>
 <b>Ripeto non posso dare certezza assoluta se funzionano oppure presentano problemi.</b>
