@@ -5,18 +5,17 @@
 # cat /etc/crontab.x/root
 # */2 * * * * /home/root/script4.sh
 
-## for 600 sec from boot not exec nothing
-#statuptime=$(cut -f1 -d. /proc/uptime)
-#if [ "$statuptime" -lt "600" ]; then
-#exit 0
-#fi
+# for 600 sec from boot not exec nothing
+statuptime=$(cut -f1 -d. /proc/uptime)
+if [ "$statuptime" -lt "600" ]; then
+exit 0
+fi
 
 logger "exec: /home/root/script4.sh"
 
 # prevent exectution this script, actual run /home/root/scritp3.sh at 2:00
 if [ -f /tmp/script3.lock ]; then
 logger "warning run /home/root/script3.sh; exit 0"
-#logger "warning I can't do anything because I'm already doing it /home/root/script3.sh"
 exit 0
 fi
 
