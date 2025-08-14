@@ -15,7 +15,11 @@ Le modifiche effettuate per alcune persone sono qui:
 https://forum.fibra.click/d/39114-aggiornamento-firmware-zyxel-lte5398-m904/1041
 
 <br/>
+Da una vecchia documentazione mi risulta che non è presente il comando <b>wget</b> viene modificata la documentazione per l'utilizzo di <b>curl</b>
+
+<br/>
 <b>Ripeto non posso dare certezza assoluta se funzionano oppure presentano problemi.</b>
+
 
 # attenzione la directory di root si trova in /home/root
 su una versione standard la directoy corretta sarebbe /root
@@ -27,8 +31,8 @@ su una versione standard la directoy corretta sarebbe /etc/crontabs
 
 # download scritps
 ```
-wget -c https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script3.sh
-wget -c https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script4.sh
+curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script3.sh
+curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script4.sh
 ```
 
 # renderli eseguibili
@@ -45,7 +49,7 @@ mkdir /etc/crontab.x
 # creazione dell'elenco dei crontab
 ```
 cd /etc/crontab.x
-wget -c https://github.com/compact21/openwrt-script/blob/main/temp/root
+curl -k https://github.com/compact21/openwrt-script/blob/main/temp/root
 ```
 
 # riavvio del servizio cron
