@@ -82,7 +82,7 @@ in modo tale che se 2 ping verso due host diversi su internet falliscono provi a
 # download scritps per la riconnessione internet e impostare permessi di esecuzione
 
 ```
-curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script3.sh > script3.sh; curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script4.sh > script4.sh; chmod 755 script3.sh; chmod 755 script4.sh
+curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script3.sh -o script3.sh; curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script4.sh -o script4.sh; chmod 755 script3.sh; chmod 755 script4.sh
 ```
 
 <br/>
@@ -93,7 +93,7 @@ curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/ma
 # creazione directory crontab, creazione dell'elenco dei crontab
 
 ```
-mkdir /etc/crontab.x; cd /etc/crontab.x; curl -k https://github.com/compact21/openwrt-script/blob/main/temp/root > root
+mkdir /etc/crontab.x; cd /etc/crontab.x; curl -k https://github.com/compact21/openwrt-script/blob/main/temp/root -o root
 ```
 
 # riavvio del servizio cron
