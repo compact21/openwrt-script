@@ -1,28 +1,34 @@
 # Script per zyxel lte5398 m904 OEM firmware
 
-Attenzione personalmente sono passato ad Openwrt
 <br/>
-ho aggiunto/modificato questi script in base alle richieste di alcune persone che hanno mantenuto il firmware OEM,
+Premessa personalmente sono passato ad Openwrt e mi trovo meglio su firmare di Openwrt.
+<br/>
+<br/>
+Ho aggiunto/modificato questi script in base alle richieste di alcune persone che hanno mantenuto il firmware OEM,
 <br/>
 quindi non posso dare certezza assoluta se funzionano oppure presentano problemi
+<br/>
 <br/>
 al massimo basta che mi fate sapere qualcosa ma <b>non mi ritengo responsabile in alcun modo di possibili problemi</b>.
 <br/>
 https://forum.fibra.click/d/39114-aggiornamento-firmware-zyxel-lte5398-m904/1052
 <br/>
-
+<br/>
 Quando ero sul firmware OEM la prima versione può essere recurerata qui:
 <br/>
 https://forum.fibra.click/d/39114-aggiornamento-firmware-zyxel-lte5398-m904/393
-
+<br/>
+<br/>
 Le modifiche effettuate per alcune persone sono qui:
 <br/>
 https://forum.fibra.click/d/39114-aggiornamento-firmware-zyxel-lte5398-m904/1041
-
+<br/>
 <br/>
 Mi risulta che non è presente il comando <b>wget</b>
 <br/>
-Da una vecchia documentazione mi sembra che sia possibile l'utilizzo di <b>curl</b>, viene modificata la documentazione
+<br/>
+Da una vecchia documentazione mi sembra che sia possibile l'utilizzo di <b>curl</b>,
+se mi date riscontro di cio vi ringrazio, intanto viene modificata la documentazione per aggevolare il lavoro
 <br/>
 
 <br/>
@@ -62,7 +68,11 @@ mi è stato chiesto di creare 2 script la cui funzione di sottofondo è la ricon
 
 le specifiche dell'utente erano/sono:
 <br/>
-alle ore 2:00 esegui "script3.sh" e riconnetti internet
+<br/>
+alle ore 2:00 esegui "script3.sh"
+<br/>
+e riconnetti la connessione internet
+<br/>
 <br/>
 ogni 2 minuti esegui "script4.sh"
 <br/>
@@ -76,9 +86,8 @@ curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/ma
 ```
 
 <br/>
-se non funzionano oppure presentano problemi al massimo basta che mi fate sapere
+<b>se gli script non funzionano oppure presentano problemi dovrete effettuare un debug e comunicarmi le modifiche necessarie.</b>
 <br/>
-qualcosa però il debug dovrete farlo voi sul vostro router
 <br/>
 
 # creazione directory crontab, creazione dell'elenco dei crontab
