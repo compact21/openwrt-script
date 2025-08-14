@@ -45,12 +45,31 @@ cat /etc/init.d/crond.sh | grep "crontab.x"
 <br/>
 su una versione standard la directoy corretta sarebbe /etc/crontabs
 
-# download scritps
+# download scritps per la riconnessione internet
+
+mi è stato chiesto di creare 2 script la cui funzione di sottofondo è la riconnessione internet
+<br/>
+
+le specifiche dell'utente erano/sono:
+<br/>
+alle ore 2:00 esegui "script3.sh" e riconnetti internet
+<br/>
+ogni 2 minuti esegui "script4.sh"
+<br/>
+in modo tale che se 2 ping verso due host diversi su internet falliscono provi a riconnettersi
+<br/>
+
 
 ```
 curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script3.sh
 curl -k https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/temp/script4.sh
 ```
+
+<br/>
+se non funzionano oppure presentano problemi al massimo basta che mi fate sapere
+<br/>
+qualcosa però il debug dovrete farlo voi sul vostro router
+<br/>
 
 # renderli eseguibili
 
