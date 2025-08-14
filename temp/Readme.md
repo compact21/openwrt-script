@@ -38,6 +38,9 @@ il modulo LTE all'interno del router "EG18-EU" sul firmware OEM è gestito con l
 # attenzione la directory di root si trova in /home/root
 
 su una versione standard la directoy corretta sarebbe /root
+<br/>
+se volete verificare il comando di riferimento è questo "pwd"
+
 
 # attenzione il demone crontab si basa sulla directory /etc/crontab.x che non esiste
 
