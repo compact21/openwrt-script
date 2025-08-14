@@ -1,7 +1,22 @@
-# /etc/crontab.x/root
-# min hour day month day-week command
-# 0-59 0-23 1-31 1-12 0-6(0=Sunday) exec
+# Dove è questo file = /etc/crontab.x/root
+#
+# ---------------------------------------------------------------------------
+# Come definire un crontab
+# vedi questo sito per esempi: https://crontab.guru/examples.html
+#
+# riassiunto in breve 
+# minuti ore giorno mese giorno-della-settimana comando-da-eseguire
+# 0-59 0-23 1-31 1-12 0-6(0=Sunday) comando
+# ---------------------------------------------------------------------------
+#
+# Esegui /home/root/script.sh ogni 1 minuti
+# * * * * * /home/root/script.sh
+#
+# Esegui /home/root/script.sh ogni 2 minuti
 # */2 * * * * /home/root/script.sh
-# 0 0 */3 * * /home/root/script2.sh
+# 
+# Esegui /home/root/script3.sh alle ore 2:00 ogni giorno
 0 2 * * * /home/root/script3.sh
+#
+# Esegui /home/root/script4.sh ogni 2 minuti
 */2 * * * * /home/root/script4.sh
