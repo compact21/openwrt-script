@@ -1,7 +1,9 @@
 #!/bin/sh
+# set -x; # enable debug
+
 #
 # if it runs with a crontab prevent it from being re-executed if file /tmp/script4.lock exists
-
+#
 # cat /etc/crontab.x/root
 # */2 * * * * /home/root/script4.sh
 
