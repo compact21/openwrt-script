@@ -1,5 +1,7 @@
 #!/bin/sh
-# 
+# set -x; # enable debug
+
+#
 # run command at 2:00 add this line into /etc/crontab.x/root
 #
 # cat /etc/crontab.x/root
