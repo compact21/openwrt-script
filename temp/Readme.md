@@ -5,12 +5,15 @@ di alcune persone che hanno mantenuto il firmware OEM, quindi non posso dare cer
 oppure presentano problemi al massimo basta che mi fate sapere qualcosa
 
 Quando ero sul firmware OEM la prima versione può essere recurerata qui:
+<br/>
 https://forum.fibra.click/d/39114-aggiornamento-firmware-zyxel-lte5398-m904/393
 
 Le modifiche effettuate per alcune persone sono qui:
+<br/>
 https://forum.fibra.click/d/39114-aggiornamento-firmware-zyxel-lte5398-m904/1041
 
-Ripeto non posso dare certezza assoluta se funzionano oppure presentano problemi.
+<br/>
+<b>Ripeto non posso dare certezza assoluta se funzionano oppure presentano problemi.</b>
 
 # attenzione la directory di root si trova in /home/root
 su una versione standard la directoy corretta sarebbe /root
