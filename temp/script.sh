@@ -1,6 +1,6 @@
 #!/bin/sh
 # set -x; # enable debug
-# shellcheck disable=SC2181
+# shellcheck disable=SC2181,SC2034
 
 # se vuoi che venga eseguito segui la documentazione e definisci il tempo minimo fra due passaggi
 # esempio:
