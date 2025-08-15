@@ -1,5 +1,6 @@
 #!/bin/sh
 # set -x; # enable debug
+# shellcheck disable=SC2181,SC2034
 
 #
 # if it runs with a crontab prevent it from being re-executed if file /tmp/script4.lock exists
