@@ -42,7 +42,7 @@ le partizioni sembrano montate in lettura e scrittura, ma riavviano il router si
 non sono più presenti quindi le partizioni non sono persistenti.
 <br/>
 
-il modulo LTE all'interno del router "EG18-EU" sul firmware OEM è gestito con la modalità "QMI"
+il modulo LTE all'interno del router "EG18-EA" sul firmware OEM è gestito con la modalità "QMI"
 <br/>
 
 
