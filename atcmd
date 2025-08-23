@@ -82,6 +82,7 @@ if [ "$string" -eq "1" ]; then
                 echo "$(date)" >> "$savefile"; cat "$file1" >> "$savefile"; rm "$file1"
         else
                 logger "exec: /root/atcmd '$1' --exit-after '$delaytime'"
+                cat "$file1" | cut -d $'\n' -f 2- | grep -E '\S' | while read -r line; do logger "exec: /root/atcmd $line"; done
                 cat "$file1"; rm "$file1"
         fi
 else
