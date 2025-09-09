@@ -15,7 +15,7 @@ if [ "$lteproto" -eq "0" ]; then
             rm "$file1"; printf "\nsend '$1' good\n"
             logger "exec: /root/connection_reset: send $1 to modem"
             else
-            printf "\nfail send '$1'\n"; cat "$file1";# rm "$file1"; exit 4
+            printf "\nfail send '$1'\n"; cat "$file1"; rm "$file1"; exit 4
             fi
         else
         printf "\nexit without doing anything\n"
@@ -25,15 +25,6 @@ if [ "$lteproto" -eq "0" ]; then
 else
 printf "\nScript not compatible with \"ModemManager\"\n"
 exit 3
-fi
-}
-
-down_wan(){
-printf "you want exec \"ifdown wan\" [y,n]\n"; read -r question
-if [ "$question" = "y" ]; then
-    printf "\nexec: ifdown wan\n"; logger "exec: /root/connection_reset: ifdown wan"; ifdown wan
-else
-    printf "\nexit without doing anything\n"; exit 1
 fi
 }
 
@@ -48,18 +39,16 @@ fi
 
 printf "select the operation:\n"
 printf "  1) send 'AT+CFUN=1,1' Reset LTE module this is the correct way to restart the interface\n"
-printf "  2) ifdown wan (for testing only)\n"
-printf "  3) send 'AT+QNWLOCK=\"common/4g\",0' to modem for unset cell-lock\n"
-printf "  4) send 'AT+QNWLOCK=\"common/4g\",1,1650,65' to modem set a cell-lcok\n"
-printf "  5) usbreset 2c7c:0512 reset usb (disconnect LTE module)\n"
+printf "  2) send 'AT+QNWLOCK=\"common/4g\",0' to modem for unset cell-lock\n"
+printf "  3) send 'AT+QNWLOCK=\"common/4g\",1,1650,65' to modem set a cell-lcok\n"
+printf "  4) usbreset 2c7c:0512 reset usb (disconnect LTE module)\n"
 printf "\n"
 read -r n
 case $n in
   1) send_at_command 'AT+CFUN=1,1' ;;
-  2) down_wan ;;
-  3) send_at_command 'AT+QNWLOCK="common/4g",0' ;;
-  4) send_at_command 'AT+QNWLOCK="common/4g",1,1650,65' ;;
-  5) usb_reset ;;
+  2) send_at_command 'AT+QNWLOCK="common/4g",0' ;;
+  3) send_at_command 'AT+QNWLOCK="common/4g",1,1650,65' ;;
+  4) usb_reset ;;
   *) printf "invalid option\n"; exit 1;;
 esac
 
