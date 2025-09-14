@@ -7,7 +7,7 @@ lteproto=$(cat /etc/config/network | grep -c "proto 'mbim'")
     if [ "$lteproto" -eq "1" ]; then
     ltestatus=$(uqmi -m -d /dev/cdc-wdm0 -t 20000 --get-data-status)
     lteerror=$?
-    ltefind=$(echo ${ltestatus} | grep -c "\"connected\"")
+    ltefind=$(echo "$ltestatus" | grep -c "\"connected\"")
         if [ "$ltefind" -eq "0" ] || [ "$lteerror" -ne "0" ] ; then
         logger "exec: /root/wan2_connect: lost connection detected or uqmi not response into 20 sec exec ifup wan"
         # ifdown not necessary from: https://forum.openwrt.org/t/what-is-the-command-to-restart-wan6/107810/2
