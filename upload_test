@@ -1,0 +1,63 @@
+#!/bin/sh
+
+ORIG_UPLOAD_FILE="/tmp/sqm_upload_orig"
+SQM_CONFIG="sqm.wan"
+MIN_UPLOAD=512
+UPLOAD_URL="https://speedtest.milan.linode.com/upload"
+TEST_FILE="/tmp/upload_test_file"
+UPTIME_MIN=600
+
+# Verifica che il sistema sia attivo da almeno $UPTIME_MIN secondi
+UPTIME=$(cut -d. -f1 /proc/uptime)
+if [ "$UPTIME" -lt "$UPTIME_MIN" ]; then
+    logger -t "exec: /tmp/upload_test" "Uptime troppo basso ($UPTIME s), test saltato"
+    exit 0
+fi
+
+# Crea file di test 1MB se non esiste
+[ -f "$TEST_FILE" ] || dd if=/dev/zero of="$TEST_FILE" bs=1M count=1
+
+# Leggi valore originale upload SQM o salva se non presente
+if [ -f "$ORIG_UPLOAD_FILE" ]; then
+    ORIG_UPLOAD=$(cat "$ORIG_UPLOAD_FILE")
+else
+    ORIG_UPLOAD=$(uci get $SQM_CONFIG.upload 2>/dev/null || echo "5000")
+    echo "$ORIG_UPLOAD" > "$ORIG_UPLOAD_FILE"
+fi
+
+# Leggi limite attuale upload SQM
+CURRENT_UPLOAD_LIMIT=$(uci get $SQM_CONFIG.upload 2>/dev/null || echo "$ORIG_UPLOAD")
+
+# Esegui test upload e verifica successo di curl
+TIME_TOTAL=$(curl -w '%{time_total}' -o /dev/null -s -T "$TEST_FILE" "$UPLOAD_URL")
+CURL_STATUS=$?
+
+if [ "$CURL_STATUS" -ne 0 ] || [ -z "$TIME_TOTAL" ] || ! awk "BEGIN {exit !($TIME_TOTAL > 0)}"; then
+    logger -t "exec: /tmp/upload_test" "Errore nel test upload, curl fallito o tempo non valido"
+    exit 1
+fi
+
+# Calcola upload in KBps (1MB = 8000 Kbit)
+UPLOAD_SPEED_KBPS=$(awk -v time="$TIME_TOTAL" 'BEGIN { printf "%.0f", 8000 / time }')
+
+# Forza valore minimo
+[ "$UPLOAD_SPEED_KBPS" -lt "$MIN_UPLOAD" ] && UPLOAD_SPEED_KBPS=$MIN_UPLOAD
+
+# Compara e aggiorna valore di SQM se necessario
+if [ "$UPLOAD_SPEED_KBPS" -ge "$ORIG_UPLOAD" ]; then
+    if [ "$CURRENT_UPLOAD_LIMIT" != "$ORIG_UPLOAD" ]; then
+        logger -t "exec: /tmp/upload_test" "Velocità upload OK, ripristino SQM a $ORIG_UPLOAD kbps"
+        uci set $SQM_CONFIG.upload="$ORIG_UPLOAD"
+        service sqm reload
+    else
+        logger -t "exec: /tmp/upload_test" "Velocità upload OK, SQM già al valore originale"
+    fi
+else
+    if [ "$CURRENT_UPLOAD_LIMIT" -ne "$UPLOAD_SPEED_KBPS" ]; then
+        logger -t "exec: /tmp/upload_test" "Upload basso, riduco SQM a $UPLOAD_SPEED_KBPS kbps"
+        uci set $SQM_CONFIG.upload="$UPLOAD_SPEED_KBPS"
+        service sqm reload
+    else
+        logger -t "exec: /tmp/upload_test" "Upload già ridotto a $UPLOAD_SPEED_KBPS kbps"
+    fi
+fi
