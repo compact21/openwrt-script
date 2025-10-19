@@ -1,7 +1,37 @@
 #!/bin/sh
-#echo "0 */3 * * * [ -x /tmp/sqm/sqm_test ] && /tmp/sqm/sqm_test" >> /etc/crontabs/root
+# esegui i seguenti passaggi:
+#
+# mkdir /tmp/sqm
+# cd /tmp/sqm
+# wget -c https://github.com/compact21/openwrt-script/raw/refs/heads/main/sqm_test
+# echo "0 */3 * * * [ -x /tmp/sqm/sqm_test ] && /tmp/sqm/sqm_test" >> /etc/crontabs/root
+# /etc/init.d/cron restart
+#
 
 SQM_DIR="/tmp/sqm"
+SCRIPT_NAME="sqm_test"
+SCRIPT_PATH="$SQM_DIR/$SCRIPT_NAME"
+
+# Controlla se /tmp/sqm esiste e è scrivibile
+if [ ! -d "$SQM_DIR" ]; then
+    echo "Errore: directory $SQM_DIR non esiste."
+    logger -t "$SCRIPT_NAME" "Errore: directory $SQM_DIR non esiste."
+    exit 1
+fi
+
+if [ ! -w "$SQM_DIR" ]; then
+    echo "Errore: directory $SQM_DIR non è scrivibile."
+    logger -t "$SCRIPT_name" "Errore: directory $SQM_DIR non è scrivibile."
+    exit 1
+fi
+
+# Controlla che il file script abbia il nome corretto (opzionale)
+if [ "$(basename "$0")" != "$SCRIPT_NAME" ]; then
+    echo "Errore: lo script deve chiamarsi $SCRIPT_NAME"
+    logger -t "$SCRIPT_NAME" "Errore: lo script deve chiamarsi $SCRIPT_NAME"
+    exit 1
+fi
+
 
 ORIG_UPLOAD_FILE="$SQM_DIR/upload_orig"
 ORIG_DOWNLOAD_FILE="$SQM_DIR/download_orig"
