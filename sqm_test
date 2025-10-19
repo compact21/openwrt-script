@@ -25,9 +25,6 @@ fi
 # Crea file test upload 1MB se non esiste
 [ -f "$UPLOAD_TEST_FILE" ] || dd if=/dev/zero of="$UPLOAD_TEST_FILE" bs=1M count=1
 
-# Crea file test download 10MB se non esiste (puoi anche lasciarlo vuoto o scaricarlo a runtime)
-[ -f "$DOWNLOAD_TEST_FILE" ] || touch "$DOWNLOAD_TEST_FILE"
-
 # Leggi valore upload originale SQM o salva se non presente
 if [ -f "$ORIG_UPLOAD_FILE" ]; then
     ORIG_UPLOAD=$(cat "$ORIG_UPLOAD_FILE")
@@ -61,7 +58,7 @@ UPLOAD_SPEED_KBPS=$(awk -v time="$TIME_UPLOAD" 'BEGIN { printf "%.0f", 8000 / ti
 [ "$UPLOAD_SPEED_KBPS" -lt "$MIN_UPLOAD" ] && UPLOAD_SPEED_KBPS=$MIN_UPLOAD
 
 # Test download
-TIME_DOWNLOAD=$(curl -w '%{time_total}' -o "$DOWNLOAD_TEST_FILE" -s "$DOWNLOAD_URL")
+TIME_DOWNLOAD=$(curl -w '%{time_total}' -o /dev/null -s "$DOWNLOAD_URL")
 CURL_DOWNLOAD_STATUS=$?
 
 if [ "$CURL_DOWNLOAD_STATUS" -ne 0 ] || [ -z "$TIME_DOWNLOAD" ] || ! awk "BEGIN {exit !($TIME_DOWNLOAD > 0)}"; then
