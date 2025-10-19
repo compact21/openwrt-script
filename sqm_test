@@ -2,7 +2,6 @@
 #echo "0 */3 * * * [ -x /tmp/sqm/sqm_test ] && /tmp/sqm/sqm_test" >> /etc/crontabs/root
 
 SQM_DIR="/tmp/sqm"
-mkdir -p "$SQM_DIR"
 
 ORIG_UPLOAD_FILE="$SQM_DIR/upload_orig"
 ORIG_DOWNLOAD_FILE="$SQM_DIR/download_orig"
