@@ -1,93 +1,175 @@
 #!/bin/sh
 #set -x
 
-LTEPROTO=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
-if [ "$LTEPROTO" -eq "1" ]; then
-printf "Script not compatible with \"ModemManager\"\n"; exit 1
-fi
-
-atcmd_block_file="/tmp/atcmd_block"; # from /root/watchdog_mbim
-if [ -f "$atcmd_block_file" ]; then
-printf "\nI can't give at commands the file %s exists\n" "$atcmd_block_file"; exit 2
-fi
-
-if [ $# -eq "0" ]; then
-echo "atcmd 'at_command'                                                                 example atcmd 'AT+CSQ'"
-echo "atcmd 'at_command' delaytime(msec)=default 300                                     example atcmd 'ATI' 2000"
-echo "atcmd 'at_command' delaytime(msec) /tmp/atcmd/file-save (only /tmp/atcmd dir)      esample atcmd 'AT+QCAINFO' /tmp/atcmd/prova"
-echo
-echo "* * * * * * WARNING * * * * * *"
-echo "be careful what you do if you don't know what is being done don't do anything"
-echo "* * * * * * WARNING * * * * * *"
-echo
-echo "example:"
-echo "atcmd 'AT'"
-echo "atcmd 'ATI'"
-echo "atcmd 'AT+CVERSION'"
-echo "ping -c 1 -w 2 8.8.8.8; atcmd 'AT+QCAINFO'"
-echo "atcmd 'AT+CGPADDR=1'; # show current ip"
-echo "atcmd 'AT+CSQ'"
-echo "atcmd 'AT+QRSRP'"
-echo "atcmd 'AT+QENG=\"servingcell\"'"
-echo "atcmd 'AT+QENG=\"neighbourcell\"'"
-echo "atcmd 'AT+QNETINFO=\"servingcell\"'"
-echo "atcmd 'AT+CPMS?'; # show actual storage SMS"
-echo "atcmd 'AT+CPMS=\"ME\",\"ME\",\"ME\"'; atcmd 'AT+CSAS'; # set and save storage SMS to ME (good)"
-echo "atcmd 'AT+QCFG=\"rrc\",4'; # set 5 to default test 4 to problems"
-echo "atcmd 'AT+QCFG=\"pcmclk\",1'; # set 0 to default test 1"
-echo "atcmd 'AT+QCFG=\"band\",0,45,1'; # band only 1+3+7"
-echo "atcmd 'AT+QCFG=\"usbnet\"'; # show current connection type 0=qmi 1=ecm 2=mbim ** WARNING EXCLUDE 3=rndis **"
-echo "atcmd 'AT+QCFG=\"usbcfg\",0x2C7C,0x0512,1,1,1,1,1,1,0'; # enable adb device"
-echo "atcmd 'AT+QCFG=\"nwscanmodeex\"'; # set 63 and default output 24 correct"
-echo "atcmd 'AT+QCFG=\"band\",8d0,1A0080800D5'; # all bands supported eg18-eu"
-echo "atcmd 'AT+QCFG=\"call_control\",1,1'; # disable voice call"
-echo "atcmd 'AT+QNWLOCK=\"common/4g\",0'; # disable cell-lock"
-echo "atcmd 'AT+QNWLOCK=\"common/4g\"'; # show current cell-lock"
-echo "atcmd 'AT+QNWLOCK=\"common/4g\",1,1650,100'; # Monte Bondone Cima Palon 230131 or 231131"
-echo
-echo "current_date $(date)"
-exit 0
-fi
-
-if [ $# -ge "1" ]; then
-#example: picocom /dev/ttyUSB2 --exit-after 2000 --quiet -t $(echo -ne "AT+QCAINFO\r\n") --logfile /tmp/prova
-#atcommand=$(echo -ne "$1\r\n")
-atcommand=$(printf "$1\r\n")
-fi
-
-if [ $# -ge "2" ]; then
-delaytime=$2
-else
+logheader="atcmd"
+nologger=0
 delaytime="300"
+atcommand=""
+savefile=""
+ttyport="/dev/ttyUSB2"
+
+LTEPROTO=$(grep -c "proto 'modemmanager'" /etc/config/network)
+if [ "$LTEPROTO" -eq 1 ]; then
+    printf "Script not compatible with \"ModemManager\"\n"
+    exit 1
 fi
 
-if [ $# -ge "3" ]; then
-pathfile=$(dirname "$3")
-savefile=$3
-if [ "$pathfile" = "/tmp/atcmd" ]; then
-        if [ ! -f "$savefile" ]; then
-        touch "$savefile"
-        fi
-else
-        printf "\nwarning file-save '%s' not in '/tmp/atcmd/'\n" "$3"; exit 3
-        fi
+atcmd_block_file="/tmp/watchdog/atcmd_block"   # from /root/bin/watchdog_mbim
+if [ -f "$atcmd_block_file" ]; then
+    printf "\nI can't give at commands, the file %s exists\n" "$atcmd_block_file"
+    exit 2
 fi
+
+usage() {
+cat <<'EOF'
+========================================================================================
+                            AT Command Utility - Usage Guide
+---------------------------------------------------------------------------------------
+ WARNING: Use with caution! If you are not sure what a command does DO NOT EXECUTE IT.
+---------------------------------------------------------------------------------------
+
+Usage:
+  atcmd -a|--at "AT-COMMAND" [options]
+  atcmd "AT-COMMAND" [options]
+
+Notes:
+  - If -a/--at is omitted, the first non-option argument is treated as the AT command.
+  - The default AT port is /dev/ttyUSB2.
+  - This utility is not compatible with ModemManager.
+  - Many AT commands modify persistent modem settings (NVRAM).
+  - Some commands may cause loss of network connectivity or remote access.
+  - Some commands require a longer delay (-d) to return complete output.
+  - Commands that do not return 'OK' may be reported as failed.
+  - Commands and responses are logged to syslog by default (use -n to disable).
+  - Output files are restricted to /tmp/atcmd/ for safety reasons.
+  - AT commands are blocked if /tmp/watchdog/atcmd_block exists.
+
+Options:
+  -a, --at        AT command to send (required)
+  -d, --delay     Delay in milliseconds (default: 300)
+  -o, --output    Output file (only allowed in /tmp/atcmd/)
+  -n, --no-log    Disable syslog logging
+  -h, --help      Show this help
+
+Examples:
+
+atcmd 'AT'; # Basic communication test, same as: atcmd -a 'AT'
+atcmd 'ATI'; # Show device information, same as: atcmd -a 'ATI'
+atcmd 'AT+CVERSION'; # Show firmware version
+ping -c 1 -w 2 8.8.8.8; atcmd 'AT+QCAINFO'; # Run ping, then show cell info
+atcmd 'AT+CGPADDR=1'; # Show current IP address
+atcmd 'AT+CSQ'; # Show signal quality
+atcmd -d 500 'AT+CSQ';  # delay before reading response
+atcmd 'AT+QRSRP'; # Show RSRP signal level
+atcmd 'AT+QENG="servingcell"'; # Show serving cell info
+atcmd 'AT+QENG="neighbourcell"'; # Show neighbouring cells
+atcmd 'AT+QNETINFO="servingcell"'; # Show current network info
+atcmd 'AT+CPMS?'; # Show actual SMS storage
+atcmd 'AT+CPMS="ME","ME","ME"'; atcmd 'AT+CSAS'; # Set and save SMS storage to ME
+atcmd 'AT+QCFG="rrc",4'; # set 5 to default test 4 to problems
+atcmd 'AT+QCFG="pcmclk",1'; # Enable PCM clock (0=default)
+atcmd 'AT+QCFG="band",0,45,1'; # Use LTE bands 1+3+7 only
+atcmd 'AT+QCFG="band",8d0,1A0080800D5'; # Enable all supported LTE bands (e.g. EG18-EU)
+atcmd 'AT+QCFG="usbnet"'; # Show USB network type (0=qmi, 1=ecm, 2=mbim) ** WARNING: mode 3=RNDIS is NOT supported on Linux but only Windows **
+atcmd 'AT+QCFG="usbcfg",0x2C7C,0x0512,1,1,1,1,1,1,0'; # Enable ADB interface
+atcmd 'AT+QCFG="nwscanmodeex"'; # Show or set network scan mode, set 63 and default output 24 correct
+atcmd 'AT+QCFG="call_control",1,1'; # Disable voice call support
+atcmd 'AT+QNWLOCK="common/4g",0'; # Disable cell lock
+atcmd 'AT+QNWLOCK="common/4g"'; # Show current cell lock status
+atcmd 'AT+QNWLOCK="common/4g",1,1650,100'; # Monte Bondone Cima Palon 230131 or 231131"
+atcmd 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Cima Palon 230131 or 231131
+
+========================================================================================
+EOF
+echo "Current date: $(date)"
+exit 0
+}
+
+orig_command="$0"
+for arg in "$@"; do
+    orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
+done
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -a|--at)
+            shift
+            atcommand="$1"
+            ;;
+        -d|--delay)
+            shift
+            delaytime="$1"
+            ;;
+        -o|--output)
+            shift
+            savefile="$1"
+            ;;
+        -n|--no-log)
+            nologger=1
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            # If atcommand non settato, il primo arg non-opzione diventa AT
+            if [ -z "$atcommand" ]; then
+                atcommand="$1"
+            else
+                printf "Unknown option: %s\n" "$1"
+                usage
+            fi
+            ;;
+    esac
+    shift
+done
+
+if [ -z "$atcommand" ]; then
+    printf "ERROR: missing AT command\n"
+    usage
+fi
+
+if [ -n "$savefile" ]; then
+    mkdir -p /tmp/atcmd
+    case "$savefile" in
+        /tmp/atcmd/*) ;;
+        *)
+            printf "ERROR: output file must be inside /tmp/atcmd/\n"
+            exit 3
+            ;;
+    esac
+fi
+
+case "$delaytime" in
+    ''|*[!0-9]*)
+        printf "ERROR: delay must be numeric\n"
+        exit 4
+        ;;
+esac
+
+atstring=$(printf "%s\r\n" "$atcommand")
 
 file1=$(mktemp)
-picocom /dev/ttyUSB2 --exit-after "$delaytime" --quiet -t "$atcommand" --logfile "$file1" > /dev/null
-string=$(cat "$file1" | grep -c "OK")
-if [ "$string" -eq "1" ]; then
-        if [ $# -eq "3" ]; then
-                logger "exec: /root/atcmd '$1' --exit-after '$delaytime' --save-file '$3'"
-                echo "$(date)" >> "$savefile"; cat "$file1" >> "$savefile"; rm "$file1"
-        else
-                logger "exec: /root/atcmd '$1' --exit-after '$delaytime'"
-                cat "$file1" | cut -d $'\n' -f 2- | grep -E '\S' | while read -r line; do logger "exec: /root/atcmd $line"; done
-                cat "$file1"; rm "$file1"
-        fi
-else
-printf "\nfail send '%s'" "$atcommand"
-cat "$file1"
-rm "$file1"
-exit 4
+
+picocom "$ttyport" --exit-after "$delaytime" --quiet -t "$atstring" --logfile "$file1" > /dev/null
+
+if ! grep -q "OK" "$file1"; then
+    printf "\nAT command failed or returned no OK: '%s'\n" "$atcommand"
+    cat "$file1"
+    rm "$file1"
+    exit 5
 fi
+
+if [ -n "$savefile" ]; then
+    [ "$nologger" -eq 0 ] && logger -t "$logheader" "$orig_command"
+    echo "$(date)" >> "$savefile"
+    cat "$file1" >> "$savefile"
+else
+    [ "$nologger" -eq 0 ] && logger -t "$logheader" "$orig_command"
+    tail -n +2 "$file1" | grep -E '[^[:space:]]' | while read -r line; do
+        [ "$nologger" -eq 0 ] && logger -t "$logheader" "$line"
+    done
+    cat "$file1"
+fi
+
+rm "$file1"
+exit 0
