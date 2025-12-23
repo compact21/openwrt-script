@@ -1,0 +1,21 @@
+#!/bin/sh
+
+LOG_LEVEL="ERROR"
+
+# Simplified logging function
+write_log() {
+    if command -v logger >/dev/null 2>&1; then
+        logger -t hotplug -p "$1" "$2"
+    else
+        echo "$1: $2" >> /dev/kmsg
+    fi
+}
+
+# Exit if hotplug variables are not set or hostapd_cli is not available
+[ -z "$DEVICENAME" ] || [ -z "$ACTION" ] || ! command -v hostapd_cli >/dev/null 2>&1 && exit 0
+
+# Change log level only if the interface is Wi-Fi and is being added
+[ "$ACTION" = "add" ] && [ -d "/sys/class/ieee80211/*/device/net/$DEVICENAME" ] && {
+    hostapd_cli -i "$DEVICENAME" log_level "$LOG_LEVEL"
+    write_log user.info "Device [$DEVICENAME]: hostapd logging level set to $LOG_LEVEL"
+}
