@@ -1,40 +1,32 @@
 #!/bin/sh
+# /etc/hotplug.d/net/99-hostapd-log-level
 
 LOG_LEVEL="ERROR"
-TAG="hotplug"
+TAG="hotplug-net"
 
-# Logging helper
-write_log() {
-    if command -v logger >/dev/null 2>&1; then
-        logger -t "$TAG" -p "$1" "$2"
-    else
-        echo "$TAG: $1 $2" >> /dev/kmsg
-    fi
-}
-
-# Exit if required hotplug variables are missing
-if [ -z "$DEVICENAME" ] || [ -z "$ACTION" ]; then
-    exit 0
-fi
-
-# Exit if hostapd_cli is not available
-if ! command -v hostapd_cli >/dev/null 2>&1; then
-    exit 0
-fi
-
-# Apply only on device add
+# Esegui solo su add di device
 [ "$ACTION" != "add" ] && exit 0
 
-# Check if DEVICENAME is a Wi-Fi interface
-WIFI_DEV=""
+# Deve esistere il nome del device
+[ -z "$DEVICENAME" ] && exit 0
+
+# Controlla se hostapd_cli è disponibile
+if ! command -v hostapd_cli >/dev/null 2>&1; then
+    logger -t "$TAG" -p user.err "hostapd_cli non trovato! Impossibile impostare log_level per $DEVICENAME"
+    exit 0
+fi
+
+# Verifica che DEVICENAME sia una interfaccia Wi-Fi
+WIFI_DEV=0
 for d in /sys/class/ieee80211/*/device/net/"$DEVICENAME"; do
     [ -e "$d" ] && WIFI_DEV=1
 done
 
-[ -z "$WIFI_DEV" ] && exit 0
+[ "$WIFI_DEV" -eq 0 ] && exit 0
 
-# Set hostapd log level
-hostapd_cli -i "$DEVICENAME" log_level "$LOG_LEVEL" >/dev/null 2>&1 && \
-    write_log user.info "Device [$DEVICENAME]: hostapd log level set to $LOG_LEVEL"
+# Imposta il livello di log di hostapd
+if hostapd_cli -i "$DEVICENAME" log_level "$LOG_LEVEL" >/dev/null 2>&1; then
+    logger -t "$TAG" -p user.info "Device [$DEVICENAME]: hostapd log level impostato su $LOG_LEVEL"
+fi
 
 exit 0
