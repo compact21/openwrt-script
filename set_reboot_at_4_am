@@ -1,14 +1,30 @@
 #!/bin/sh
-echo "date=\"$(date)\""
-echo "uptime=\"$(uptime -s)\""
-echo
-echo "You are scheduling a reboot at 4:00,"
-echo "attention lose the information saved into log files"
-echo
-read -n1 -p "proceed with a reboot at 4:00 [y,n] " question
-if [ ${question} == "y" ]; then
+
+setreboot(){
 echo "reboot" | at 4:00
-else
-echo
-echo "You have chosen to cancel the procedure."
-fi
+clear
+printf "******************************************\n"
+printf "Warning: the router will reboot at 4:00 am\n"
+printf "         lose information saved into logs\n"
+printf "******************************************\n"
+printf "To stop it you exec:\n"
+printf " atq; # list atjobs\n"
+printf " atrm jobs_number; # delete atjob\n"
+printf "******************************************\n\n"
+}
+
+setnoreboot(){
+printf "\nYou have chosen to cancel the procedure.\n"
+}
+
+printf "date=\"$(date)\"\n"
+printf "uptime=\"$(uptime -s)\"\n\n"
+printf "You are scheduling a reboot at 4:00 ...\n"
+printf "attention lose the information saved into log files\n\n"
+printf "proceed with a reboot at 4:00 [y,n]\n"
+read -r n
+case $n in
+  y) setreboot ;;
+  n) setnoreboot ;;
+  *) printf "invalid option\n"; exit 1;;
+esac
