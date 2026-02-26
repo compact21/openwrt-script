@@ -1,54 +1,198 @@
 #!/bin/sh
 #set -x
 
-send_at_command(){
-lteproto=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
-if [ "$lteproto" -eq "0" ]; then
-    if [ $# -eq 1 ]; then
-    atcommand=$(printf "$1\r\n")
-    printf "you want send '$1' you modem [y,n]\n"; read -r question
-        if [ "$question" = "y" ]; then
-        file1=$(mktemp)
-        picocom -t "$atcommand" /dev/ttyUSB2 --nolock --exit-after 300 --quiet --logfile "$file1" > /dev/null
-        string=$(cat "$file1" | grep -c "OK")
-            if [ "$string" -eq "1" ]; then
-            rm "$file1"; printf "\nsend '$1' good\n"
-            logger "exec: /root/connection_reset: send $1 to modem"
-            else
-            printf "\nfail send '$1'\n"; cat "$file1"; rm "$file1"; exit 4
-            fi
-        else
-        printf "\nexit without doing anything\n"
-        exit 1
+logheader="connection_reset"
+modem="/dev/ttyUSB2"
+
+# Watchdog directory
+watchdog_dir="/tmp/watchdog"
+
+# Prevents concurrent AT command execution (external lock mechanism)
+atcmd_block_file="/tmp/watchdog/atcmd_block"
+
+# Temporarily disables watchdog actions during modem reset
+watchdog_block_file="/tmp/watchdog/watchdog.block"
+
+# External host used to verify WAN connectivity after reset
+ping_target="8.8.8.8"
+ping_timeout_sec=300
+
+# Tracks user decision about command execution: none | sent | cancel
+user_accept_command_exec="none"
+
+# Ensure watchdog directory exists
+mkdir -p "$watchdog_dir" || {
+    logger -t "$logheader" "Failed to create $watchdog_dir"
+    exit 1
+}
+
+# ------------------------------------------------------------------------------------------------
+# Prevent concurrent execution 
+script_lock_file="/tmp/connection_reset.lock"
+
+if [ -f "$script_lock_file" ]; then
+    echo "Another instance is running. Exiting."
+    logger -t "$logheader" "Script already running"
+    exit 1
+fi
+
+touch "$script_lock_file" || exit 1
+trap 'rm -f "$script_lock_file"' EXIT INT TERM
+
+# ------------------------------------------------------------------------------------------------
+# Wait until WAN is reachable via ping
+wait_for_ping() {
+    start_ts=$(date +%s)
+    # Infinite loop controlled by manual timeout check
+    while :; do
+        ping -c 1 -W 1 "$ping_target" >/dev/null 2>&1 # -W 1 = 1 sec timeout (busybox ping)
+        if [ $? -eq 0 ]; then
+            logger -t "$logheader" "Ping to $ping_target successful, WAN online"
+            break
         fi
+        now_ts=$(date +%s)
+        delta=$((now_ts - start_ts))
+        if [ "$delta" -ge "$ping_timeout_sec" ]; then
+            logger -t "$logheader" "Ping timeout reached ($ping_timeout_sec s), giving up"
+            break
+        fi
+        sleep 1
+    done
+}
+
+# Function to send AT commands
+send_atcmd() {
+    send_at_command="$1"
+    timeout_ms="${2:-1000}"  # default timeout in ms
+
+    # Check AT command block file
+    if [ -f "$atcmd_block_file" ]; then
+        echo "Modem busy ($atcmd_block_file exists), skipping AT command."
+        logger -t "$logheader" "Skipped AT command due to block file: $send_at_command"
+        return 0
     fi
-else
-printf "\nScript not compatible with \"ModemManager\"\n"
-exit 3
-fi
+
+    # Skip AT commands if ModemManager controls the modem (avoid device conflicts)
+    if grep -q "proto 'modemmanager'" /etc/config/network 2>/dev/null; then
+        echo "Script not compatible with ModemManager. Skipping AT command."
+        logger -t "$logheader" "Skipped AT command due to ModemManager protocol."
+        return 0
+    fi
+
+    # Check if modem exists
+    if [ ! -c "$modem" ]; then
+        echo "Error: modem $modem not found or not a TTY."
+        logger -t "$logheader" "Modem not found, skipping AT command: $send_at_command"
+        return 0
+    fi
+
+    # Check if picocom exists
+    if ! command -v picocom >/dev/null 2>&1; then
+        echo "Error: picocom not found."
+        logger -t "$logheader" "Picocom not found, skipping AT command: $send_at_command"
+        return 0
+    fi
+
+    # Ask user if they want to send the command
+    echo "Do you want to send AT command: $send_at_command ? [y/n]"
+    read -r answer
+    if [ "$(echo "$answer" | tr '[:upper:]' '[:lower:]')" != "y" ]; then
+        echo "Skipping send AT command"
+        user_accept_command_exec="cancel"
+        return 0
+    fi
+
+    user_accept_command_exec="sent"
+
+    # Send the AT command
+    logger -t "$logheader" "Sending AT command: $send_at_command"
+
+    # Create tempfile for output picocom
+    tempfile=$(mktemp) || {
+        logger -t "$logheader" "mktemp failed"
+        return 1
+    }
+
+    picocom "$modem" --quiet -t "$(printf '%s\r\n' "$send_at_command")" --exit-after "$timeout_ms" --logfile "$tempfile"
+    status=$?
+
+    if ! grep -q "OK" "$tempfile"; then
+        echo "AT command failed or returned no OK"
+        logger -t "$logheader" "AT command failed: $send_at_command"
+        cat "$tempfile"
+    else
+        while IFS= read -r line; do
+            [ -n "$line" ] && logger -t "$logheader" "AT: $line"
+        done <"$tempfile"
+    fi
+
+    rm -f "$tempfile"
+
+    if [ "$status" -ne "0" ]; then
+        echo "Error sending AT command, exit code: $status"
+        logger -t "$logheader" "AT command exit code: $status for $send_at_command"
+    fi
+
+    # If at_command equals "AT+CFUN=1,1", block the watchdog
+    if [ "$send_at_command" = "AT+CFUN=1,1" ]; then
+        touch "$watchdog_block_file"
+        logger -t "$logheader" "Created watchdog block file: $watchdog_block_file"
+
+        # Auto-remove watchdog block after 80s in case WAN recovery fails
+        ( sleep 80 && rm -f "$watchdog_block_file" ) &
+
+        # Wait for WAN connectivity to be restored
+        logger -t "$logheader" "Waiting for WAN to come online (ping $ping_target)"
+        wait_for_ping
+
+        # Ensure watchdog lock is removed even if background cleanup hasn't executed yet
+        [ -f "$watchdog_block_file" ] && rm -f "$watchdog_block_file"
+        logger -t "$logheader" "Removed lock file: $watchdog_block_file"
+    fi
 }
 
-usb_reset(){
-printf "you want exec \"usbreset 2c7c:0512\" [y,n]\n"; read -r question
-if [ "$question" = "y" ]; then
-    printf "\nexec: usbreset 2c7c:0512\n"; logger "exec: /root/connection_reset: usbreset 2c7c:0512"; usbreset 2c7c:0512
-else
-    printf "\nexit without doing anything\n"; exit 1
-fi
+# Function to reset USB
+usb_reset() {
+
+    # Check if usbreset exists
+    if ! command -v usbreset >/dev/null 2>&1; then
+        logger -t "$logheader" "usbreset not installed"
+        return 1
+    fi
+
+    echo "Do you want to execute usbreset 2c7c:0512? [y/n]"
+    read -r answer
+    if [ "$(echo "$answer" | tr '[:upper:]' '[:lower:]')" != "y" ]; then
+        echo "Skipping USB reset"
+        return 0
+    fi
+
+    echo "Executing: usbreset 2c7c:0512"
+    logger -t "$logheader" "Executing usbreset 2c7c:0512"
+    usbreset 2c7c:0512
+    user_accept_command_exec="sent"
 }
 
-printf "select the operation:\n"
-printf "  1) send 'AT+CFUN=1,1' Reset LTE module this is the correct way to restart the interface\n"
-printf "  2) send 'AT+QNWLOCK=\"common/4g\",0' to modem for unset cell-lock\n"
-printf "  3) send 'AT+QNWLOCK=\"common/4g\",1,1650,65' to modem set a cell-lcok\n"
-printf "  4) usbreset 2c7c:0512 reset usb (disconnect LTE module)\n"
-printf "\n"
-read -r n
-case $n in
-  1) send_at_command 'AT+CFUN=1,1' ;;
-  2) send_at_command 'AT+QNWLOCK="common/4g",0' ;;
-  3) send_at_command 'AT+QNWLOCK="common/4g",1,1650,65' ;;
-  4) usb_reset ;;
-  *) printf "invalid option\n"; exit 1;;
+# ------------------------------------------------------------------------------------------------
+# Interactive menu
+echo "Select operation:"
+echo " 1) Detach LTE connection (AT+CGATT=0)"
+echo " 2) Unset cell-lock (AT+QNWLOCK=\"common/4g\",0)"
+echo " 3) Set cell-lock (AT+QNWLOCK=\"common/4g\",1,1650,65)"
+echo " 4) Reset USB (usbreset 2c7c:0512)"
+echo " 5) Reset LTE module (AT+CFUN=1,1)"
+echo
+read -r choice
+
+case "$choice" in
+    1) send_atcmd 'AT+CGATT=0' 300 ;;
+    2) send_atcmd 'AT+QNWLOCK="common/4g",0' ;;
+    3) send_atcmd 'AT+QNWLOCK="common/4g",1,1650,65' ;;
+    4) usb_reset ;;
+    5) send_atcmd 'AT+CFUN=1,1' 30000 ;;
+    *) echo "Invalid option"; exit 0 ;;
 esac
 
+if [ "$user_accept_command_exec" != "none" ]; then
+    logger -t "$logheader" "User command execution result: $user_accept_command_exec"
+fi
