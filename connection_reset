@@ -46,7 +46,8 @@ wait_for_ping() {
     # Infinite loop controlled by manual timeout check
     while :; do
         ping -c 1 -W 1 "$ping_target" >/dev/null 2>&1 # -W 1 = 1 sec timeout (busybox ping)
-        if [ $? -eq 0 ]; then
+        ping_error=$?
+        if [ "$ping_error" -eq "0" ]; then
             logger -t "$logheader" "Ping to $ping_target successful, WAN online"
             break
         fi
