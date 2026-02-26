@@ -1,2 +1,38 @@
 #!/bin/sh
-logread | grep -E "atcmd|crash|exec|wan_connect|wan2_connect|listpackages|connection_reset|watchdog"; echo; echo "current date $(date)"
+
+# Default pattern separati da spazi
+DEFAULT_PATTERN="atcmd bootrclocal clean-core clearlog connection_reset crash hotplug-button listpackages sqm myvnstat wan_connect wan2_connect watchdog_mbim wifi"
+
+show_help() {
+    echo "Uso: $0 [PATTERN] [LINES]"
+    echo
+    echo "Parametri:"
+    echo "  PATTERN   Pattern da cercare nei log (default: $DEFAULT_PATTERN)"
+    echo "  LINES     Numero di linee finali da mostrare (default: 0 = tutto)"
+    echo
+    echo "Esempi:"
+    echo "  $0 atcmd 50"
+    echo "    Trova le ultime 50 linee e cerca in esse 'atcmd'"
+    echo
+    echo "  $0 'atcmd watchdog_mbim'"
+    echo "    Mostra tutto il log contenente 'atcmd' o 'watchdog_mbim'"
+    echo
+    echo "  $0 'atcmd watchdog_mbim' 100"
+    echo "    Trova le ultime 100 linee e cerca in esse 'atcmd' oppure 'watchdog_mbim'"
+}
+
+PATTERN=${1:-$DEFAULT_PATTERN}
+LINES=${2:-0}
+
+if [ "$1" = "help" ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    show_help
+    exit 0
+fi
+
+if [ "$LINES" -gt 0 ]; then
+    logread | tail -n "$LINES" | grep -E "$(echo $PATTERN | sed 's/ /|/g')"
+else
+    logread | grep -E "$(echo $PATTERN | sed 's/ /|/g')"
+fi
+
+echo "current date $(date)"
