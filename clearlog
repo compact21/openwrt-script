@@ -1,5 +1,17 @@
 #!/bin/sh
-dmesg -c
-/etc/init.d/log restart
-sleep 1
-logger "exec: /root/clearlog $(date)"
+
+logheader="clearlog"
+
+if [ "$#" -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "help" ]; then
+        echo "Clears kernel logs and restarts logging service."
+        echo
+        echo "Usage: clearlog erase"
+        exit 0
+fi
+
+if [ "$1" = "erase" ]; then
+        dmesg -c > /dev/null 2>&1
+        [ -x /etc/init.d/log ] && /etc/init.d/log restart
+        echo "Logs cleared"
+        logger -t "$logheader" "Kernel logs cleared on $(date)"
+fi
