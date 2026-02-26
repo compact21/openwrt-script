@@ -1,14 +1,45 @@
 #!/bin/sh
 
-lteproto=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
-if [ "$lteproto" -eq "0" ]; then
-file1=$(mktemp)
-ping -W 2 -c 1 9.9.9.9 > /dev/null 2>&1
-picocom -t "$(printf 'AT+QENG="servingcell"\r\n')" /dev/ttyUSB2 --nolock --exit-after 300 --quiet --logfile "$file1" > /dev/null
-cellinfo=$(cat "$file1" | awk 'FNR == 2 {print}' | awk -F "," '{print $7}' | cut -c -5 | awk '{ printf "%d\n", "0x" $1 }')
-echo "$cellinfo"
-rm "$file1"
-else
-echo "Script not compatible with \"ModemManager\""
-exit 1
+DEVICE="/dev/ttyUSB2"
+
+lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
+if [ "$lteproto" -ne 0 ]; then
+    echo "Script not compatible with \"ModemManager\""
+    exit 1
 fi
+
+file1=$(mktemp)
+
+# Ping
+ping -W 2 -c 1 9.9.9.9 > /dev/null 2>&1
+
+# Esegui AT+QENG="servingcell"
+picocom -t "$(printf 'AT+QENG="servingcell"\r\n')" "$DEVICE" --nolock --exit-after 300 --quiet --logfile "$file1" > /dev/null
+
+# Leggi la riga +QENG
+LINE=$(grep '+QENG: "servingcell"' "$file1")
+
+if [ -z "$LINE" ]; then
+    echo "Nessuna risposta dal modem"
+    rm "$file1"
+    exit 1
+fi
+
+# Stampa riga raw
+echo "$LINE"
+
+# Estrai campi principali
+CELLID_HEX=$(echo "$LINE" | cut -d',' -f7 | cut -c1-5)
+CELLID=$(printf "%d\n" 0x"$CELLID_HEX")
+PCI=$(echo "$LINE" | cut -d',' -f8)
+EARFCN=$(echo "$LINE" | cut -d',' -f9)
+
+# MCCMNC (per link CellMapper)
+MCC=$(echo "$LINE" | cut -d',' -f5)
+MNC=$(echo "$LINE" | cut -d',' -f6)
+MCCMNC="$MCC$MNC"
+
+# Link LTE Italy
+echo "Cell ID lteitaly: https://lteitaly.it/it/internal/map.php#bts=$MCCMNC.$CELLID"
+
+rm "$file1"
