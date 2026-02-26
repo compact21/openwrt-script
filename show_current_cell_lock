@@ -1,12 +1,29 @@
-#! /bin/sh
-lteproto=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
-if [ "$lteproto" -eq "0" ]; then
-file1=$(mktemp)
-picocom /dev/ttyUSB2 -x 2000 -q -t $(printf "AT+QNWLOCK=\"common/4g\"\r\n") --logfile "$file1" > /dev/null
-string=$(cat "$file1" | grep "+QNWLOCK:")
-printf "$string\n"
-rm "$file1"
-else
-printf "Script not compatible with \"ModemManager\"\n"
-exit 1
+#!/bin/sh
+
+DEVICE="/dev/ttyUSB2"
+
+# Controllo ModemManager
+lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
+if [ "$lteproto" -ne 0 ]; then
+    echo "Script not compatible with \"ModemManager\""
+    exit 1
 fi
+
+# File temporaneo
+FILE=$(mktemp)
+
+# Esegui AT+QNWLOCK="common/4g"
+picocom "$DEVICE" -x 2000 -q -t "$(printf 'AT+QNWLOCK=\"common/4g\"\r\n')" --logfile "$FILE" > /dev/null 2>&1
+
+# Leggi la riga +QNWLOCK
+LOCK_LINE=$(grep '+QNWLOCK:' "$FILE")
+
+if [ -n "$LOCK_LINE" ]; then
+    echo "Cell lock rilevato:"
+    echo "$LOCK_LINE"
+else
+    echo "Nessun cell lock rilevato"
+fi
+
+# Rimuovi file temporaneo
+rm "$FILE"
