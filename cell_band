@@ -1,13 +1,81 @@
 #!/bin/sh
 
-lteproto=$(cat /etc/config/network | grep -c "proto 'modemmanager'")
-if [ "$lteproto" -eq "0" ]; then
-file1=$(mktemp)
-ping -W 2 -c 1 9.9.9.9 > /dev/null 2>&1
-picocom -t "$(printf 'AT+QCAINFO\r\n')" /dev/ttyUSB2 --nolock --exit-after 300 --quiet --logfile "$file1" > /dev/null
-cat "$file1"
-rm "$file1"
-else
-echo "Script not compatible with \"ModemManager\""
-exit 1
+DEVICE="/dev/ttyUSB2"
+
+# Funzione di conversione codice bandwidth in MHz
+bw_to_mhz() {
+    case $1 in
+        6) echo 1.4 ;;
+        15) echo 3 ;;
+        25) echo 5 ;;
+        50) echo 10 ;;
+        75) echo 15 ;;
+        100) echo 20 ;;
+        *) echo 0 ;;
+    esac
+}
+
+# Controllo ModemManager
+lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
+if [ "$lteproto" -ne 0 ]; then
+    echo "Script not compatible with \"ModemManager\""
+    exit 1
 fi
+
+# Ping
+ping -c 5 9.9.9.9 > /dev/null 2>&1 &
+
+# File temporaneo
+FILE=$(mktemp)
+
+# Esegui AT+QCAINFO e salva output
+picocom -t "$(printf 'AT+QCAINFO\r\n')" "$DEVICE" --nolock --exit-after 300 --quiet --logfile "$FILE" > /dev/null 2>&1
+
+# Stampa righe raw +QCAINFO
+grep '+QCAINFO:' "$FILE"
+
+# Inizializza variabili
+TOTAL=0
+SCC_COUNT=0
+PCC_COUNT=0
+LINE_OUT=""
+
+# Parsing PCC e SCC dal file temporaneo
+while IFS= read -r LINE; do
+    echo "$LINE" | grep -qi '+QCAINFO:' || continue
+
+    TYPE=$(echo "$LINE" | cut -d',' -f1 | tr -d '"')
+    BW_CODE=$(echo "$LINE" | cut -d',' -f3 | tr -d '"')
+    BAND=$(echo "$LINE" | cut -d',' -f4 | tr -d '"')
+
+    MHZ=$(bw_to_mhz "$BW_CODE")
+    [ "$MHZ" = "0" ] && continue
+
+    case "$TYPE" in
+        *pcc*)
+            PCC_COUNT=$((PCC_COUNT+1))
+            ENTRY="PCC-$BAND ${MHZ} MHz"
+            ;;
+        *scc*)
+            SCC_COUNT=$((SCC_COUNT+1))
+            ENTRY="SCC$SCC_COUNT-$BAND ${MHZ} MHz"
+            ;;
+    esac
+
+    # Costruisce stringa unica
+    if [ -n "$LINE_OUT" ]; then
+        LINE_OUT="$LINE_OUT | $ENTRY"
+    else
+        LINE_OUT="$ENTRY"
+    fi
+
+    TOTAL=$(awk "BEGIN {print $TOTAL+$MHZ}")
+
+done < "$FILE"
+
+# Stampa risultati
+echo "$LINE_OUT"
+echo "Totale aggregato: $TOTAL MHz"
+
+# Rimuovi file temporaneo
+rm "$FILE"
