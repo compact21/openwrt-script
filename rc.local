@@ -1,0 +1,124 @@
+# Put your custom commands here that should be executed once
+# the system init finished. By default this file does nothing.
+
+# Define log tag and path for LTE cell lock status
+logheader="bootrclocal"
+lockfile="/tmp/cell-lock"
+
+logger -t "$logheader" "start process /etc/rc.local"
+
+# Ensure /etc/shells exists with correct permissions
+[ ! -f /etc/shells ] && cp /rom/etc/shells /etc/shells && chmod 644 /etc/shells
+
+# Led switch off/restore 
+if [ -x /usr/bin/mdio ]; then
+    logger -t "$logheader" "disabling switch LEDs"
+    mdio mt7530-0 0:0x1f raw 0x21 0x0008
+    #logger -t "$logheader" "restore switch LEDs"
+    #mdio mt7530-0 0:0x1f raw 0x21 0x000b
+fi
+
+# Create temporary directories
+mkdir -p /tmp/atcmd /tmp/mnt /tmp/boot /tmp/ftp /tmp/watchdog /tmp/qfirehose /tmp/lib/vnstat
+
+# Remove legacy scripts
+rm -f /etc/rc.button/rfkill /etc/rc.button/wps
+
+# Save environment & boot info
+env > /tmp/boot/rc_local_env.txt
+set -o > /tmp/boot/rc_local_shell_opts.txt
+stamp="$(date +%s)"
+stamp1="$(date)"
+echo "$stamp" > /tmp/boot/boot_date
+echo "$stamp1" > /tmp/boot/boot_date_human
+dmesg > /tmp/boot/dmesg_boot
+
+# Connectivity check function with delay
+check_ping_with_delay() {
+    target="$1"
+    outfile="/tmp/boot/ping_$target"
+
+    ping -c 5 -W 1 "$target" > "$outfile" 2>&1
+    status=$?
+
+    if [ "$status" -eq "0" ]; then
+        logger -t "$logheader" "ping $target successful"
+        return 0
+    else
+        logger -t "$logheader" "ping $target failed, sleep 60"
+        sleep 60
+        return 1
+    fi
+}
+
+# wifi off on boot
+wifi down > /dev/null 2>&1
+
+# Disable Voice led
+touch /tmp/voice_led_disable
+
+# Remove core dump files
+#touch /tmp/clear-core-file
+
+# Run the initialization script if it exists and is executable
+if [ -x "/tmp/mnt/rc-local/setting_init_script" ]; then
+    /tmp/mnt/rc-local/setting_init_script
+fi
+
+# Wait 60 seconds for WAN if LTE cell lock not applied; otherwise, remove the lockfile
+if [ ! -f "$lockfile" ]; then
+    logger -t "$logheader" "sleep 60 to wait for WAN uplink"
+    sleep 60
+else
+    rm -f "$lockfile"
+fi
+
+# Connectivity checks
+check_ping_with_delay 1.1.1.1
+status1=$?
+
+# Update vnStat databases
+if [ -x /usr/bin/vnstat ]; then
+    logger -t "$logheader" "run \"vnstat -u -i br-lan\""
+    vnstat -u -i br-lan
+    logger -t "$logheader" "run \"vnstat -u -i wwan0\""
+    vnstat -u -i wwan0
+fi
+
+# NTP update
+check_ping_with_delay 9.9.9.9
+status2=$?
+if [ "$status2" -eq 0 ]; then
+    logger -t "$logheader" "WAN is up, starting one-shot NTP synchronization"
+    ntp_log="/tmp/boot/boot_ntpd"
+    ntpd -nq -p pool.ntp.org > "$ntp_log" 2>&1
+    if grep -q "setting time to" "$ntp_log"; then
+        ntp_offset=$(grep "setting time to" "$ntp_log" | sed -n 's/.*offset \([0-9.+-]*\)s.*/\1/p')
+        logger -t "$logheader" "NTP sync successful | offset: $ntp_offset"
+        sleep 2
+        /etc/init.d/sysntpd restart
+        sleep 2
+    else
+        logger -t "$logheader" "NTP did not adjust system time (check $ntp_log for details)"
+    fi
+else
+    logger -t "$logheader" "WAN not ready, skipping NTP synchronization"
+fi
+
+
+# atd and watchdog_mbim scheduling
+check_ping_with_delay www.google.it
+status3=$?
+if [ -x /etc/init.d/atd ] && [ "$status3" -eq "0" ] && [ -x /etc/init.d/watchdog_mbim ]; then
+        /etc/init.d/atd reload
+        logger -t "$logheader" "run echo \"/etc/init.d/watchdog_mbim start\" | at now+10minutes"
+        echo "/etc/init.d/watchdog_mbim start" | at now+10minutes
+else
+        logger -t "$logheader" "Ping check failed, waiting 300s before starting watchdog"
+        sleep 300
+        /etc/init.d/watchdog_mbim start
+fi
+
+logger -t "$logheader" "end process /etc/rc.local"
+
+exit 0
