@@ -92,6 +92,7 @@ atcmd 'AT+QCFG="band",8d0,1A0080800D5,1'; # Enable all supported LTE bands (e.g.
 atcmd 'AT+QCFG="usbnet"'; # Show USB network type (0=qmi, 1=ecm, 2=mbim) ** WARNING: mode 3=RNDIS is NOT supported on Linux but only Windows **
 atcmd 'AT+QCFG="usbcfg",0x2C7C,0x0512,1,1,1,1,1,1,0'; # Enable ADB interface
 atcmd 'AT+QCFG="call_control",1,1'; # Disable voice call support
+atcmd 'AT+QPOWD=1'; # This will power off the LTE modem
 
 ---------------------------------------------------------------------------------------
 
