@@ -88,7 +88,7 @@ atcmd 'AT+CPMS="ME","ME","ME"'; atcmd 'AT+CSAS'; # Set and save SMS storage to M
 atcmd 'AT+QCFG="band",0,5,1'; # Use LTE bands 1+3 only
 atcmd 'AT+QCFG="band",0,45,1'; # Use LTE bands 1+3+7 only
 atcmd 'AT+QCFG="band",0,80045,1'; # Use LTE bands 1+3+7+20 only
-atcmd 'AT+QCFG="band",8d0,1A0080800D5,1'; # Enable all supported LTE bands (e.g. EG18-EU)
+atcmd 'AT+QCFG="band",8d0,1A0080800D5,1'; # Enable all supported LTE bands (e.g. EG18-EA)
 atcmd 'AT+QCFG="usbnet"'; # Show USB network type (0=qmi, 1=ecm, 2=mbim) ** WARNING: mode 3=RNDIS is NOT supported on Linux but only Windows **
 atcmd 'AT+QCFG="usbcfg",0x2C7C,0x0512,1,1,1,1,1,1,0'; # Enable ADB interface
 atcmd 'AT+QCFG="call_control",1,1'; # Disable voice call support
