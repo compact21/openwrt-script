@@ -11,19 +11,35 @@ smart_qnwlock=0
 ping_target="8.8.8.8"
 qnwlock_max_wait=70
 qnwlock_ping_interval=2
+atcmd_dir="/tmp/atcmd/"
+
+# Check if picocom is installed
+if ! command -v picocom &> /dev/null; then
+    echo "Error: picocom is not installed. Please install it to run this script."
+    exit 1
+fi
+
+# Check if the AT port (ttyport) exists
+if [ ! -e "$ttyport" ]; then
+    echo "Error: AT port $ttyport not found."
+    exit 2
+fi
+
+# Check if $atcmd_dir directory exists, if not, create it
+mkdir -p "$atcmd_dir" || { echo "Error: Unable to create $atcmd_dir directory."; exit 8; }
 
 # Check compatibility with ModemManager
 lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
 if [ "$lteproto" -eq 1 ]; then
-    printf "Script not compatible with \"ModemManager\"\n"
-    exit 1
+    echo "Error: Script not compatible with \"ModemManager\""
+    exit 3
 fi
 
 # Check if atcmd is blocked by watchdog_mbim
 atcmd_block_file="/tmp/watchdog/atcmd_block"
 if [ -f "$atcmd_block_file" ]; then
-    printf "\nI can't give at commands, the file %s exists\n" "$atcmd_block_file"
-    exit 2
+    echo "I can't give at commands, the file $atcmd_block_file exists"
+    exit 4
 fi
 
 # Save the original command for logging
@@ -217,39 +233,45 @@ while [ $# -gt 0 ]; do
             if [ -z "$atcommand" ]; then
                 atcommand="$1"
             else
-                printf "Unknown option: %s\n" "$1"
+                echo "Unknown option: $1"
                 usage
+                exit 5
             fi
             ;;
     esac
     shift
 done
 
-# validations
+# validations that the AT command was provided
 if [ -z "$atcommand" ]; then
-    #printf "ERROR: missing AT command\n"
-    #exit 3
+    echo "ERROR: missing AT command"
+    echo
     usage
+    exit 6
 fi
 
 # validate delaytime numeric
 case "$delaytime" in
     ''|*[!0-9]*)
-        printf "ERROR: delay must be numeric\n"
-        exit 6
+        echo "ERROR: delay must be numeric"
+        exit 7
         ;;
 esac
 
 # validate savefile path
 if [ -n "$savefile" ]; then
-    case "$savefile" in
-        /tmp/atcmd/*) ;;
-        *)
-            printf "ERROR: output file must be inside /tmp/atcmd/\n"
-            exit 7
-            ;;
-    esac
-    mkdir -p /tmp/atcmd
+    # Check if the savefile path starts with the atcmd_dir
+    if [[ ! "$savefile" =~ ^$atcmd_dir ]]; then
+        echo "ERROR: output file $savefile must be inside $atcmd_dir"
+        exit 8
+    fi
+
+    # Check if the directory exists
+    savefile_dir=$(dirname "$savefile")
+    if [ ! -d "$savefile_dir" ]; then
+        echo "ERROR: The directory $savefile_dir does not exist."
+        exit 8
+    fi
 fi
 
 # smart qnwlock handling
@@ -260,8 +282,8 @@ if [ "$smart_qnwlock" -eq 1 ]; then
         exit $?
         ;;
         *)
-        printf "error: --smart-qnwlock requires AT+QNWLOCK=\"common/4g\",<n>\n"
-        exit 4
+        echo "Error: --smart-qnwlock requires AT+QNWLOCK=\"common/4g\",<n>"
+        exit 9
         ;;
     esac
 fi
