@@ -91,7 +91,7 @@ Examples:
 atcmd 'AT'; # Basic communication test, same as: atcmd -a 'AT'
 atcmd 'ATI'; # Show device information, same as: atcmd -a 'ATI'
 atcmd 'AT+CVERSION'; # Show firmware version
-atcmd 'ATI1'; # Enable the "echo" mode or use 'ATI0' to disable it
+atcmd 'ATI1'; # Enable the "echo" mode or use 'ATI0' to disable it, Use 'AT&W' to save the setting
 ping -c 5 -W 2 8.8.8.8 > /dev/null 2>&1; atcmd 'AT+QCAINFO'; # Run ping, then show cell info
 atcmd 'AT+CGPADDR=1'; # Show current IP address
 atcmd 'AT+CSQ'; # Show signal quality
