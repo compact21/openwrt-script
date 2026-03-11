@@ -1,8 +1,10 @@
 #!/bin/sh
 
+#set -x
+
 DEVICE="/dev/ttyUSB2"
 
-# Funzione di conversione codice bandwidth in MHz
+# Convert LTE bandwidth code to MHz
 bw_to_mhz() {
     case $1 in
         6) echo 1.4 ;;
@@ -15,32 +17,50 @@ bw_to_mhz() {
     esac
 }
 
-# Controllo ModemManager
+# Check if ModemManager is configured (not compatible)
 lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
 if [ "$lteproto" -ne 0 ]; then
     echo "Script not compatible with \"ModemManager\""
     exit 1
 fi
 
-# Ping
-ping -c 5 9.9.9.9 > /dev/null 2>&1 &
+# Record start time
+START_EPOCH=$(date +%s)
 
-# File temporaneo
+# Generate light traffic: ping continuously until a response is received
+ping 9.9.9.9 > /dev/null 2>&1 &
+PING_PID=$!
+
+# Create temporary file for modem output
 FILE=$(mktemp)
 
-# Esegui AT+QCAINFO e salva output
-picocom -t "$(printf 'AT+QCAINFO\r\n')" "$DEVICE" --nolock --exit-after 300 --quiet --logfile "$FILE" > /dev/null 2>&1
+# Send AT+QCAINFO command and log output, with 120s timeout
+while true; do
+    picocom -t "$(printf 'AT+QCAINFO\r\n')" "$DEVICE" --nolock --exit-after 300 --quiet --logfile "$FILE" > /dev/null 2>&1
 
-# Stampa righe raw +QCAINFO
+    # Exit loop if at least one +QCAINFO line is received
+    grep -q '+QCAINFO:' "$FILE" && break
+
+    # Check elapsed time
+    ELAPSED=$(( $(date +%s) - START_EPOCH ))
+    [ "$ELAPSED" -ge 120 ] && { echo "Timeout reached (120s)"; break; }
+
+    sleep 2
+done
+
+# Stop ping process
+kill "$PING_PID" 2>/dev/null || true
+
+# Print raw modem lines
 grep '+QCAINFO:' "$FILE"
 
-# Inizializza variabili
+# Initialize counters
 TOTAL=0
 SCC_COUNT=0
 PCC_COUNT=0
 LINE_OUT=""
 
-# Parsing PCC e SCC dal file temporaneo
+# Parse PCC and SCC information
 while IFS= read -r LINE; do
     echo "$LINE" | grep -qi '+QCAINFO:' || continue
 
@@ -62,20 +82,26 @@ while IFS= read -r LINE; do
             ;;
     esac
 
-    # Costruisce stringa unica
+    # Build aggregated line string
     if [ -n "$LINE_OUT" ]; then
         LINE_OUT="$LINE_OUT | $ENTRY"
     else
         LINE_OUT="$ENTRY"
     fi
 
+    # Sum total bandwidth using awk for decimals
     TOTAL=$(awk "BEGIN {print $TOTAL+$MHZ}")
 
 done < "$FILE"
 
-# Stampa risultati
+# Print aggregated information
 echo "$LINE_OUT"
-echo "Totale aggregato: $TOTAL MHz"
+echo "Total aggregated bandwidth: $TOTAL MHz"
 
-# Rimuovi file temporaneo
+# Record end time and duration
+END_EPOCH=$(date +%s)
+DURATION=$((END_EPOCH - START_EPOCH))
+echo "Elapsed time: ${DURATION} seconds"
+
+# Remove temporary file
 rm "$FILE"
