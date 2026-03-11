@@ -3,6 +3,40 @@
 #set -x
 
 DEVICE="/dev/ttyUSB2"
+TRAFFIC_MODE="ping"
+DOWNLOAD_URL=""
+PING_SERVER="9.9.9.9"
+VERBOSE=0
+TEMP_DOWNLOAD=""
+
+show_help() {
+    echo "Usage: $0 [options]"
+    echo ""
+    echo "Options:"
+    echo "  -h           Show this help message"
+    echo "  -d URL       Download a file from URL instead of ping (use files >10 MB for reliable CA detection)"
+    echo "  -p SERVER    Server to ping (default: 9.9.9.9)"
+    echo "  -v           Verbose mode"
+    echo ""
+    echo "Examples:"
+    echo "  $0"
+    echo "  $0 -p 8.8.8.8"
+    echo "  $0 -v -p 1.1.1.1"
+    echo "  $0 -d http://speedtest.tele2.net/10MB.zip"
+    echo "  $0 -v -d https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.3.0-amd64-netinst.iso"
+    exit 0
+}
+
+# Parse options
+while getopts "hd:p:v" opt; do
+    case "$opt" in
+        h) show_help ;;
+        d) TRAFFIC_MODE="download"; DOWNLOAD_URL="$OPTARG" ;;
+        p) PING_SERVER="$OPTARG" ;;
+        v) VERBOSE=1 ;;
+        *) show_help ;;
+    esac
+done
 
 # Convert LTE bandwidth code to MHz
 bw_to_mhz() {
@@ -17,7 +51,7 @@ bw_to_mhz() {
     esac
 }
 
-# Check if ModemManager is configured (not compatible)
+# Check if ModemManager is configured
 lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
 if [ "$lteproto" -ne 0 ]; then
     echo "Script not compatible with \"ModemManager\""
@@ -27,41 +61,76 @@ fi
 # Record start time
 START_EPOCH=$(date +%s)
 
-# Generate light traffic: ping continuously until a response is received
-ping 9.9.9.9 > /dev/null 2>&1 &
-PING_PID=$!
+# Cleanup
+cleanup() {
+    [ -n "$TRAFFIC_PID" ] && kill "$TRAFFIC_PID" 2>/dev/null || true
+    [ -n "$FILE" ] && rm -f "$FILE"
+    [ -n "$TEMP_DOWNLOAD" ] && rm -f "$TEMP_DOWNLOAD"
+}
+trap cleanup INT TERM
+
+# Generate traffic
+if [ "$TRAFFIC_MODE" = "ping" ]; then
+
+    [ "$VERBOSE" -eq 1 ] && echo "Starting ping to $PING_SERVER"
+
+    ping "$PING_SERVER" > /dev/null 2>&1 &
+    TRAFFIC_PID=$!
+
+else
+
+    if [ -z "$DOWNLOAD_URL" ]; then
+        echo "Error: missing URL for download"
+        exit 1
+    fi
+
+    [ "$VERBOSE" -eq 1 ] && echo "Download mode enabled."
+    [ "$VERBOSE" -eq 1 ] && echo "Tip: for reliable CA detection the download file should be larger than 10 MB."
+
+    TEMP_DOWNLOAD=$(mktemp /tmp/cellband_download.XXXXXX)
+
+    [ "$VERBOSE" -eq 1 ] && echo "Downloading $DOWNLOAD_URL to $TEMP_DOWNLOAD"
+
+    curl -s -o "$TEMP_DOWNLOAD" "$DOWNLOAD_URL" &
+    TRAFFIC_PID=$!
+
+fi
+
+# Allow traffic to ramp up before querying modem
+[ "$VERBOSE" -eq 1 ] && echo "Waiting 5 seconds before sending AT+QCAINFO..."
+sleep 5
 
 # Create temporary file for modem output
 FILE=$(mktemp)
 
-# Send AT+QCAINFO command and log output, with 120s timeout
+# Send AT+QCAINFO command and save output, with 120s timeout
 while true; do
+
+    # Query modem
     picocom -t "$(printf 'AT+QCAINFO\r\n')" "$DEVICE" --nolock --exit-after 300 --quiet --logfile "$FILE" > /dev/null 2>&1
 
-    # Exit loop if at least one +QCAINFO line is received
     grep -q '+QCAINFO:' "$FILE" && break
 
-    # Check elapsed time
     ELAPSED=$(( $(date +%s) - START_EPOCH ))
     [ "$ELAPSED" -ge 120 ] && { echo "Timeout reached (120s)"; break; }
 
     sleep 2
+
 done
 
-# Stop ping process
-kill "$PING_PID" 2>/dev/null || true
+# Stop traffic generator
+kill "$TRAFFIC_PID" 2>/dev/null || true
 
-# Print raw modem lines
+# Print raw modem output
 grep '+QCAINFO:' "$FILE"
 
-# Initialize counters
 TOTAL=0
 SCC_COUNT=0
 PCC_COUNT=0
 LINE_OUT=""
 
-# Parse PCC and SCC information
 while IFS= read -r LINE; do
+
     echo "$LINE" | grep -qi '+QCAINFO:' || continue
 
     TYPE=$(echo "$LINE" | cut -d',' -f1 | tr -d '"')
@@ -82,26 +151,23 @@ while IFS= read -r LINE; do
             ;;
     esac
 
-    # Build aggregated line string
     if [ -n "$LINE_OUT" ]; then
         LINE_OUT="$LINE_OUT | $ENTRY"
     else
         LINE_OUT="$ENTRY"
     fi
 
-    # Sum total bandwidth using awk for decimals
     TOTAL=$(awk "BEGIN {print $TOTAL+$MHZ}")
 
 done < "$FILE"
 
-# Print aggregated information
 echo "$LINE_OUT"
 echo "Total aggregated bandwidth: $TOTAL MHz"
 
-# Record end time and duration
 END_EPOCH=$(date +%s)
 DURATION=$((END_EPOCH - START_EPOCH))
-echo "Elapsed time: ${DURATION} seconds"
 
-# Remove temporary file
-rm "$FILE"
+[ "$VERBOSE" -eq 1 ] && echo "Elapsed time: ${DURATION} seconds"
+
+# Cleanup temporary files
+cleanup
