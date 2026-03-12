@@ -25,6 +25,7 @@ mkdir -p /tmp/atcmd /tmp/mnt /tmp/boot /tmp/ftp /tmp/watchdog /tmp/qfirehose /tm
 rm -f /etc/rc.button/rfkill /etc/rc.button/wps
 
 # Save environment & boot info
+logger -t "$logheader" "Save environment & boot info first other commands"
 env > /tmp/boot/rc_local_env.txt
 set -o > /tmp/boot/rc_local_shell_opts.txt
 stamp="$(date +%s)"
@@ -32,6 +33,7 @@ stamp1="$(date)"
 echo "$stamp" > /tmp/boot/boot_date
 echo "$stamp1" > /tmp/boot/boot_date_human
 dmesg > /tmp/boot/dmesg_boot
+logread > /tmp/boot/logread_boot
 
 # Connectivity check function with delay
 check_ping_with_delay() {
@@ -118,6 +120,13 @@ else
         sleep 300
         /etc/init.d/watchdog_mbim start
 fi
+
+logger -t "$logheader" "save current /proc/interrupts into /tmp/boot/interrupts"
+cat /proc/interrupts > /tmp/boot/interrupts
+
+logger -t "$logheader" "Save dmesg/logread after other commands"
+dmesg > /tmp/boot/dmesg_after_rclocal
+logread > /tmp/boot/logread_after_rclocal
 
 logger -t "$logheader" "end process /etc/rc.local"
 
