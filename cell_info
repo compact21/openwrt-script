@@ -1,45 +1,114 @@
 #!/bin/sh
 
-DEVICE="/dev/ttyUSB2"
+ping_server="9.9.9.9"
+max_wait=120 # second
 
+# Check ModemManager
 lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
-if [ "$lteproto" -ne 0 ]; then
-    echo "Script not compatible with \"ModemManager\""
+[ "$lteproto" -ne 0 ] && { echo "Script not compatible with ModemManager"; exit 1; }
+
+# Help function
+usage() {
+cat <<EOF
+Usage: $(basename "$0") [options]
+
+Options:
+  -h           Show this help
+  -v           Verbose/debug mode
+  -p server    Start continuous ping to SERVER before querying modem (default: 9.9.9.9)
+
+Description:
+  Queries modem for current LTE serving cell information using AT+QENG="servingcell".
+  Provides Cell ID, PCI, EARFCN, and link to LTEItaly.
+EOF
+exit 0
+}
+
+verbose=0
+
+# Parse options
+while getopts "hvp:" opt; do
+    case "$opt" in
+        h) usage ;;
+        v) verbose=1 ;;
+        p) ping_server="$OPTARG" ;;
+        *) usage ;;
+    esac
+done
+
+# Cleanup function to stop ping and remove temporary files
+cleanup() {
+    [ -n "$traffic_pid" ] && kill "$traffic_pid" 2>/dev/null || true
+    [ -n "$tmp_file" ] && rm -f "$tmp_file"
+}
+
+# Trap CTRL+C and TERM signals to clean up before exiting
+trap_ctrlc() {
+    echo
+    echo "Keyboard interruption (CTRL+C). Cleaning up..."
+    cleanup
+    exit 1
+}
+trap trap_ctrlc INT TERM
+
+start_epoch=$(date +%s)
+
+# Start continuous ping
+[ "$verbose" -eq 1 ] && echo "Starting continuous ping to $ping_server"
+ping "$ping_server" > /dev/null 2>&1 &
+traffic_pid=$!
+
+# Function to send AT command and store output
+send_at() {
+    at="$1"
+    tmp_file=$(mktemp)
+    atstring=$(printf "%s\r\n" "$at")
+    picocom "/dev/ttyUSB2" --nolock --exit-after "600" --quiet -t "$atstring" --logfile "$tmp_file" > /dev/null
+}
+
+[ "$verbose" -eq 1 ] && echo "Waiting 2 seconds before sending AT+QENG=\"servingcell\"..."
+sleep 2
+
+# Send AT+QENG="servingcell" command and capture output with max_wait timeout
+while true; do
+    send_at 'AT+QENG="servingcell"'
+
+    line=$(grep '+QENG: "servingcell"' "$tmp_file" 2>/dev/null)
+
+    if [ -n "$line" ]; then
+        break
+    fi
+
+    elapsed=$(( $(date +%s) - start_epoch ))
+    [ "$elapsed" -ge "$max_wait" ] && { echo "Timeout: no LTE cell attached within $max_wait seconds"; cleanup; exit 1; }
+
+    [ "$verbose" -eq 1 ] && { echo "Debug output:"; cat "$tmp_file"; }
+    rm -f "$tmp_file"
+    sleep 2
+done
+
+# Parse fields
+cellid_hex=$(echo "$line" | cut -d',' -f7 | cut -c1-5)
+if [ -z "$cellid_hex" ]; then
+    echo "Cell ID not available"
+    [ "$verbose" -eq 1 ] && { echo "Debug output:"; cat "$tmp_file"; }
+    cleanup
     exit 1
 fi
 
-file1=$(mktemp)
+# Convert hex Cell ID to decimal and prepare output variables
+cellid=$(printf "%d\n" 0x"$cellid_hex")
+pci=$(echo "$line" | cut -d',' -f8)
+earfcn=$(echo "$line" | cut -d',' -f9)
+mcc=$(echo "$line" | cut -d',' -f5)
+mnc=$(echo "$line" | cut -d',' -f6)
+mccmnc="$mcc$mnc"
 
-# Ping
-ping -W 2 -c 1 9.9.9.9 > /dev/null 2>&1
+end_epoch=$(date +%s)
+duration=$((end_epoch - start_epoch))
 
-# Esegui AT+QENG="servingcell"
-picocom -t "$(printf 'AT+QENG="servingcell"\r\n')" "$DEVICE" --nolock --exit-after 300 --quiet --logfile "$file1" > /dev/null
+echo "Raw line: $line"
+echo "Cell ID LTEItaly: https://lteitaly.it/it/internal/map.php#bts=$mccmnc.$cellid"
+[ "$verbose" -eq 1 ] && echo "Elapsed time: ${duration} seconds"
 
-# Leggi la riga +QENG
-LINE=$(grep '+QENG: "servingcell"' "$file1")
-
-if [ -z "$LINE" ]; then
-    echo "Nessuna risposta dal modem"
-    rm "$file1"
-    exit 1
-fi
-
-# Stampa riga raw
-echo "$LINE"
-
-# Estrai campi principali
-CELLID_HEX=$(echo "$LINE" | cut -d',' -f7 | cut -c1-5)
-CELLID=$(printf "%d\n" 0x"$CELLID_HEX")
-PCI=$(echo "$LINE" | cut -d',' -f8)
-EARFCN=$(echo "$LINE" | cut -d',' -f9)
-
-# MCCMNC (per link CellMapper)
-MCC=$(echo "$LINE" | cut -d',' -f5)
-MNC=$(echo "$LINE" | cut -d',' -f6)
-MCCMNC="$MCC$MNC"
-
-# Link LTE Italy
-echo "Cell ID lteitaly: https://lteitaly.it/it/internal/map.php#bts=$MCCMNC.$CELLID"
-
-rm "$file1"
+cleanup
