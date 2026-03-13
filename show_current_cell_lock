@@ -1,29 +1,59 @@
 #!/bin/sh
 
-DEVICE="/dev/ttyUSB2"
-
-# Controllo ModemManager
+# Check ModemManager
 lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
-if [ "$lteproto" -ne 0 ]; then
-    echo "Script not compatible with \"ModemManager\""
-    exit 1
-fi
+[ "$lteproto" -ne 0 ] && { echo "Script not compatible with ModemManager"; exit 1; }
 
-# File temporaneo
-FILE=$(mktemp)
+# Help function
+usage() {
+cat <<EOF
+Usage: $(basename "$0") [options]
 
-# Esegui AT+QNWLOCK="common/4g"
-picocom "$DEVICE" -x 2000 -q -t "$(printf 'AT+QNWLOCK=\"common/4g\"\r\n')" --logfile "$FILE" > /dev/null 2>&1
+Options:
+  -h      Show this help
+  -v      Verbose/debug mode: show modem output if no cell lock is detected
 
-# Leggi la riga +QNWLOCK
-LOCK_LINE=$(grep '+QNWLOCK:' "$FILE")
+Description:
+  Queries modem for current LTE cell-lock status using AT+QNWLOCK="common/4g"
+EOF
+exit 0
+}
 
-if [ -n "$LOCK_LINE" ]; then
-    echo "Cell lock rilevato:"
-    echo "$LOCK_LINE"
-else
-    echo "Nessun cell lock rilevato"
-fi
+verbose=0
 
-# Rimuovi file temporaneo
-rm "$FILE"
+# Parse options
+while getopts "hv" opt; do
+    case "$opt" in
+        h) usage ;;
+        v) verbose=1 ;;
+        *) usage ;;
+    esac
+done
+
+# Function to send AT command and check cell-lock
+send_at() {
+    at="$1"
+    tmpfile=$(mktemp)
+    atstring=$(printf "%s\r\n" "$at")
+    picocom "/dev/ttyUSB2" --exit-after "600" --quiet -t "$atstring" --logfile "$tmpfile" > /dev/null
+
+    lock_line=$(grep '+QNWLOCK:' "$tmpfile")
+
+    if [ -n "$lock_line" ]; then
+        if echo "$lock_line" | grep -q ',0'; then
+            echo "No cell lock detected"
+            [ "$verbose" -eq 1 ] && { echo "Debug output:"; cat "$tmpfile"; }
+        else
+            echo "Cell lock detected:"
+            echo "$lock_line"
+        fi
+    else
+        echo "No cell lock detected"
+        [ "$verbose" -eq 1 ] && { echo "Debug output:"; cat "$tmpfile"; }
+    fi
+
+    rm -f "$tmpfile"
+}
+
+# Execute command
+send_at 'AT+QNWLOCK="common/4g"'
