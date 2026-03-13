@@ -1,44 +1,48 @@
 #!/bin/sh
 
-#set -x
+ping_server="9.9.9.9"
+max_wait=120 # second
 
-DEVICE="/dev/ttyUSB2"
-TRAFFIC_MODE="ping"
-DOWNLOAD_URL=""
-PING_SERVER="9.9.9.9"
-VERBOSE=0
-TEMP_DOWNLOAD=""
+# Check ModemManager
+lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
+[ "$lteproto" -ne 0 ] && { echo "Script not compatible with ModemManager"; exit 1; }
 
-show_help() {
-    echo "Usage: $0 [options]"
-    echo ""
-    echo "Options:"
-    echo "  -h           Show this help message"
-    echo "  -d URL       Download a file from URL instead of ping (use files >10 MB for reliable CA detection)"
-    echo "  -p SERVER    Server to ping (default: 9.9.9.9)"
-    echo "  -v           Verbose mode"
-    echo ""
-    echo "Examples:"
-    echo "  $0"
-    echo "  $0 -p 8.8.8.8"
-    echo "  $0 -v -p 1.1.1.1"
-    echo "  $0 -d http://speedtest.tele2.net/10MB.zip"
-    echo "  $0 -v -d https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.3.0-amd64-netinst.iso"
-    exit 0
+verbose=0
+traffic_mode="ping"
+
+# Help function
+usage() {
+cat <<EOF
+Usage: $(basename "$0") [options]
+
+Options:
+  -h           Show this help
+  -d URL       Download a file from URL instead of ping (use files >10 MB for reliable CA detection)
+  -p SERVER    Server to ping (default: 9.9.9.9)
+  -v           Verbose/debug mode
+
+Examples:
+  $0
+  $0 -p 8.8.8.8
+  $0 -v -p 1.1.1.1
+  $0 -d http://speedtest.tele2.net/10MB.zip
+  $0 -v -d http://speedtest.tele2.net/100MB.zip
+EOF
+exit 0
 }
 
 # Parse options
 while getopts "hd:p:v" opt; do
     case "$opt" in
-        h) show_help ;;
-        d) TRAFFIC_MODE="download"; DOWNLOAD_URL="$OPTARG" ;;
-        p) PING_SERVER="$OPTARG" ;;
-        v) VERBOSE=1 ;;
-        *) show_help ;;
+        h) usage ;;
+        d) traffic_mode="download"; download_url="$OPTARG" ;;
+        p) ping_server="$OPTARG" ;;
+        v) verbose=1 ;;
+        *) usage ;;
     esac
 done
 
-# Convert LTE bandwidth code to MHz
+# Function: convert LTE bandwidth code to MHz
 bw_to_mhz() {
     case $1 in
         6) echo 1.4 ;;
@@ -51,123 +55,81 @@ bw_to_mhz() {
     esac
 }
 
-# Check if ModemManager is configured
-lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
-if [ "$lteproto" -ne 0 ]; then
-    echo "Script not compatible with \"ModemManager\""
-    exit 1
-fi
-
-# Record start time
-START_EPOCH=$(date +%s)
-
-# Cleanup
+# Cleanup function
 cleanup() {
-    [ -n "$TRAFFIC_PID" ] && kill "$TRAFFIC_PID" 2>/dev/null || true
-    [ -n "$FILE" ] && rm -f "$FILE"
-    [ -n "$TEMP_DOWNLOAD" ] && rm -f "$TEMP_DOWNLOAD"
+    [ -n "$traffic_pid" ] && kill "$traffic_pid" 2>/dev/null || true
+    [ -n "$file" ] && rm -f "$file"
+    [ -n "$temp_download" ] && rm -f "$temp_download"
 }
 trap cleanup INT TERM
 
+start_epoch=$(date +%s)
+
 # Generate traffic
-if [ "$TRAFFIC_MODE" = "ping" ]; then
-
-    [ "$VERBOSE" -eq 1 ] && echo "Starting ping to $PING_SERVER"
-
-    ping "$PING_SERVER" > /dev/null 2>&1 &
-    TRAFFIC_PID=$!
-
+if [ "$traffic_mode" = "ping" ]; then
+    [ "$verbose" -eq 1 ] && echo "Starting ping to $ping_server"
+    ping "$ping_server" > /dev/null 2>&1 &
+    traffic_pid=$!
 else
-
-    if [ -z "$DOWNLOAD_URL" ]; then
-        echo "Error: missing URL for download"
-        exit 1
-    fi
-
-    [ "$VERBOSE" -eq 1 ] && echo "Download mode enabled."
-    [ "$VERBOSE" -eq 1 ] && echo "Tip: for reliable CA detection the download file should be larger than 10 MB."
-
-    TEMP_DOWNLOAD=$(mktemp /tmp/cellband_download.XXXXXX)
-
-    [ "$VERBOSE" -eq 1 ] && echo "Downloading $DOWNLOAD_URL to $TEMP_DOWNLOAD"
-
-    curl -s -o "$TEMP_DOWNLOAD" "$DOWNLOAD_URL" &
-    TRAFFIC_PID=$!
-
+    [ -z "$download_url" ] && { echo "Error: missing URL for download"; exit 1; }
+    [ "$verbose" -eq 1 ] && echo "Download mode enabled. Tip: file >10MB for reliable CA detection."
+    temp_download=$(mktemp /tmp/cellband_download.XXXXXX)
+    [ "$verbose" -eq 1 ] && echo "Downloading $download_url to $temp_download"
+    curl -s -o "$temp_download" "$download_url" &
+    traffic_pid=$!
 fi
 
-# Allow traffic to ramp up before querying modem
-[ "$VERBOSE" -eq 1 ] && echo "Waiting 5 seconds before sending AT+QCAINFO..."
+[ "$verbose" -eq 1 ] && echo "Waiting 5 seconds before sending AT+QCAINFO..."
 sleep 5
 
-# Create temporary file for modem output
-FILE=$(mktemp)
-
-# Send AT+QCAINFO command and save output, with 120s timeout
+# Send AT+QCAINFO command and save output, with $max_wait timeout
+file=$(mktemp)
 while true; do
-
-    # Query modem
-    picocom -t "$(printf 'AT+QCAINFO\r\n')" "$DEVICE" --nolock --exit-after 300 --quiet --logfile "$FILE" > /dev/null 2>&1
-
-    grep -q '+QCAINFO:' "$FILE" && break
-
-    ELAPSED=$(( $(date +%s) - START_EPOCH ))
-    [ "$ELAPSED" -ge 120 ] && { echo "Timeout reached (120s)"; break; }
-
+    picocom -t "$(printf 'AT+QCAINFO\r\n')" "/dev/ttyUSB2" --nolock --exit-after "300" --quiet --logfile "$file" > /dev/null 2>&1
+    grep -q '+QCAINFO:' "$file" && break
+    elapsed=$(( $(date +%s) - start_epoch ))
+    [ "$elapsed" -ge "$max_wait" ] && { echo "Timeout reached ($max_wait)s"; break; }
     sleep 2
-
 done
 
-# Stop traffic generator
-kill "$TRAFFIC_PID" 2>/dev/null || true
+kill "$traffic_pid" 2>/dev/null || true
 
-# Print raw modem output
-grep '+QCAINFO:' "$FILE"
+# Extract and display PCC/SCC bands from modem output
+grep '+QCAINFO:' "$file"
 
-TOTAL=0
-SCC_COUNT=0
-PCC_COUNT=0
-LINE_OUT=""
+total=0
+scc_count=0
+pcc_count=0
+line_out=""
 
-while IFS= read -r LINE; do
+while IFS= read -r line; do
+    echo "$line" | grep -qi '+QCAINFO:' || continue
+    type=$(echo "$line" | cut -d',' -f1 | tr -d '"')
+    bw_code=$(echo "$line" | cut -d',' -f3 | tr -d '"')
+    band=$(echo "$line" | cut -d',' -f4 | tr -d '"')
+    mhz=$(bw_to_mhz "$bw_code")
+    [ "$mhz" = "0" ] && continue
 
-    echo "$LINE" | grep -qi '+QCAINFO:' || continue
-
-    TYPE=$(echo "$LINE" | cut -d',' -f1 | tr -d '"')
-    BW_CODE=$(echo "$LINE" | cut -d',' -f3 | tr -d '"')
-    BAND=$(echo "$LINE" | cut -d',' -f4 | tr -d '"')
-
-    MHZ=$(bw_to_mhz "$BW_CODE")
-    [ "$MHZ" = "0" ] && continue
-
-    case "$TYPE" in
+    case "$type" in
         *pcc*)
-            PCC_COUNT=$((PCC_COUNT+1))
-            ENTRY="PCC-$BAND ${MHZ} MHz"
+            pcc_count=$((pcc_count+1))
+            entry="PCC-$band ${mhz} MHz"
             ;;
         *scc*)
-            SCC_COUNT=$((SCC_COUNT+1))
-            ENTRY="SCC$SCC_COUNT-$BAND ${MHZ} MHz"
+            scc_count=$((scc_count+1))
+            entry="SCC$scc_count-$band ${mhz} MHz"
             ;;
     esac
 
-    if [ -n "$LINE_OUT" ]; then
-        LINE_OUT="$LINE_OUT | $ENTRY"
-    else
-        LINE_OUT="$ENTRY"
-    fi
+    [ -n "$line_out" ] && line_out="$line_out | $entry" || line_out="$entry"
+    total=$(awk "BEGIN {print $total+$mhz}")
+done < "$file"
 
-    TOTAL=$(awk "BEGIN {print $TOTAL+$MHZ}")
+echo "$line_out"
+echo "Total aggregated bandwidth: $total MHz"
 
-done < "$FILE"
+end_epoch=$(date +%s)
+duration=$((end_epoch - start_epoch))
+[ "$verbose" -eq 1 ] && echo "Elapsed time: ${duration} seconds"
 
-echo "$LINE_OUT"
-echo "Total aggregated bandwidth: $TOTAL MHz"
-
-END_EPOCH=$(date +%s)
-DURATION=$((END_EPOCH - START_EPOCH))
-
-[ "$VERBOSE" -eq 1 ] && echo "Elapsed time: ${DURATION} seconds"
-
-# Cleanup temporary files
 cleanup
