@@ -2,52 +2,30 @@
 #set -x
 
 logheader="atcmd"
+atcmd_dir="/tmp/atcmd/"
 nologger=0
 delaytime="600"
 atcommand=""
 savefile=""
+
+# Device port
 ttyport="/dev/ttyUSB2"
+ttyport_timeout=120         # Timeout device port seconds
+sleep_interval=2            # For device polling
+max_retries=20              #
+interval_between_retries=5  # For AT command
+
+# Smart QNWLOCK / CFUN
+# AT+CFUN=1,1 and AT+QNWLOCK="common/4g",[1-9]
 smart_qnwlock=0
-ping_target="8.8.8.8"
-qnwlock_max_wait=70
-qnwlock_ping_interval=2
-atcmd_dir="/tmp/atcmd/"
+watchdog_block_file="/tmp/watchdog/watchdog.block"  # watchdog block execution
+wait_after_cfun=40                                  # Seconds to wait after sending AT+CFUN=1,1
+wait_atter_ifup=60                                  # Seconds to wait after ifup wan
+ping_target="8.8.8.8"                               # ping server
+ping_connection_timeout=120                         # Maximum time in seconds for LTE connection
+ping_interval=2                                     # Interval between successive pings
 
-# Check if picocom is installed
-if ! command -v picocom > /dev/null; then
-    echo "Error: picocom is not installed. Please install it to run this script."
-    exit 1
-fi
-
-# Check if the AT port (ttyport) exists
-if [ ! -e "$ttyport" ]; then
-    echo "Error: AT port $ttyport not found."
-    exit 2
-fi
-
-# Check if $atcmd_dir directory exists, if not, create it
-mkdir -p "$atcmd_dir" || { echo "Error: Unable to create $atcmd_dir directory."; exit 8; }
-
-# Check compatibility with ModemManager
-lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
-if [ "$lteproto" -eq 1 ]; then
-    echo "Error: Script not compatible with \"ModemManager\""
-    exit 3
-fi
-
-# Check if atcmd is blocked by watchdog_mbim
-atcmd_block_file="/tmp/watchdog/atcmd_block"
-if [ -f "$atcmd_block_file" ]; then
-    echo "I can't give at commands, the file $atcmd_block_file exists"
-    exit 4
-fi
-
-# Save the original command for logging
-orig_command="$0"
-for arg in "$@"; do
-    orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
-done
-
+# ---------------------------------------------------------------------------------------------------
 # Usage
 usage() {
 cat <<'EOF'
@@ -65,13 +43,14 @@ Options:
   -d, --delay <ms>      Delay in milliseconds (default: 600)
   -o, --output <file>   Save output (only /tmp/atcmd/)
   -n, --no-log          Disable syslog logging
-  -S, --smart-qnwlock   Apply AT+QNWLOCK with connectivity check and fallback
+  -S, --smart-qnwlock   Apply AT+QNWLOCK with modem/WAN restart and LTE fallback
+                        Only effective when <n> >= 1; if <n> is 0 or missing, command
+                        executes as standard QNWLOCK
   -h, --help            Show this help
 
 
 Notes:
 
-  - "-S" "--smart-qnwlock" is valid ONLY with: AT+QNWLOCK="common/4g",<n>,...
   - If -a/--at is omitted, the first non-option argument is treated as the AT command.
   - The default AT port is /dev/ttyUSB2.
   - This utility is not compatible with ModemManager.
@@ -85,6 +64,12 @@ Warning:
   - Some commands require a longer delay (-d) to return complete output.
   - Commands that do not return 'OK' may be reported as failed.
   - Commands and responses are logged to syslog by default (use -n to disable).
+
+Warning - special commands:
+  - Using -S with AT+QNWLOCK will restart the modem, restart WAN, and check LTE automatically.
+    Only effective when <n> >= 1; otherwise executes as standard QNWLOCK.
+  - Using AT+CFUN=1,1 will automatically restart the modem, cycle the WAN interface,
+    wait for modem readiness, and then resume operation to ensure LTE connectivity.
 
 Examples:
 
@@ -148,16 +133,24 @@ atcmd 'AT+QCFG="usbcfg",0x2C7C,0x0512,1,1,1,1,1,1,0'; # Enable ADB interface
 # Modem Control
 atcmd 'AT+QPOWD=1';      # Power off the LTE modem
 atcmd 'AT+CFUN=1,1';     # Soft reboot modem and enable radio (full restart)
-atcmd 'AT+QTEMP?';       # Show modem temperature
+atcmd 'AT+QTEMP';       # Show modem temperature
 
 ---------------------------------------------------------------------------------------
 
-atcmd 'AT+QNWLOCK="common/4g",0'; # Disable cell lock
-atcmd 'AT+QNWLOCK="common/4g"'; # Show current cell lock status
+# Standard AT+QNWLOCK commands
+atcmd 'AT+QNWLOCK="common/4g",0';          # Disable cell lock
+atcmd 'AT+QNWLOCK="common/4g"';            # Show current cell lock status
+atcmd 'AT+QNWLOCK="common/4g",1,1650,100'; # Single cell lock whitout fallback
 
-# Smart QNLOCK example
-atcmd -S 'AT+QNWLOCK="common/4g",1,1650,100; # Monte Bondone Cima Palon 230131 or 231131
+---------------------------------------------------------------------------------------
+
+# Smart QNWLOCK examples (-S): restart modem, restart WAN, automatic LTE check and fallback
+atcmd -S 'AT+QNWLOCK="common/4g",1,1650,100;                  # Monte Bondone Cima Palon 230131 or 231131
 atcmd -S 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Cima Palon 230131 or 231131
+
+# Standard QNWLOCK (executed normally if -S used with n=0 or missing)
+atcmd -S 'AT+QNWLOCK="common/4g",0'                   # Executes as standard command
+atcmd -S 'AT+QNWLOCK="common/4g"'                     # Executes as standard command
 
 ---------------------------------------------------------------------------------------
 
@@ -167,85 +160,169 @@ echo "Current date: $(date)"
 exit 0
 }
 
-# Send AT command
+# ---------------------------------------------------------------------------------------------------
+# Logging helper
+log() {
+    msg="$1"
+    [ "$nologger" -eq 0 ] && logger -t "$logheader" "$msg"
+    echo "$msg"
+}
+
+log_multiline() {
+    tmpfile="$1"
+    # Process each line of the file
+    tail -n +2 "$tmpfile" | grep -E '[^[:space:]]' | while IFS= read -r line; do
+        # Print each line to the terminal (always)
+        echo "$line"
+        # Log to syslog if nologger is 0
+        if [ "$nologger" -eq 0 ]; then
+            logger -t "$logheader" "$line"
+        fi
+    done
+}
+
+# Send AT command using picocom
 send_at() {
     at="$1"
     delay="${2:-$delaytime}"
-    log_label="${3:-$orig_command}"
     tmpfile=$(mktemp)
 
-    # Create AT string with CR/LF for modem
+    # Prepare AT command string with CR/LF
     atstring=$(printf "%s\r\n" "$at")
 
     # Send AT command via picocom
-    picocom "$ttyport" --exit-after "$delay" --quiet -t "$atstring" --logfile "$tmpfile" > /dev/null
+    picocom "$ttyport" --exit-after "$delay" --quiet -t "$atstring" --logfile "$tmpfile" >/dev/null 2>&1
 
-    # Check if command returned OK
-    if ! grep -q "OK" "$tmpfile"; then
-        cat "$tmpfile"
-        rm -f "$tmpfile"
-        return 1
+    # Determine command result
+    if grep -q "OK" "$tmpfile"; then
+        result="OK"
+    else
+        result="FAILED"
     fi
 
-    # Logging or saving output
+    # Log compact syslog entry if logging is enabled
+    if [ "$nologger" -eq 0 ]; then
+        logger -t "$logheader" "at_command=\"$at\" result=$result"
+    fi
+
+    # Handle multiline output and log/show it
+    log_multiline "$tmpfile"
+
+    # Display or save full command output
     if [ -n "$savefile" ]; then
-        [ "$nologger" -eq 0 ] && logger -t "$logheader" "$log_label"
         date >> "$savefile"
         cat "$tmpfile" >> "$savefile"
-    else
-        [ "$nologger" -eq 0 ] && logger -t "$logheader" "$log_label"
-        tail -n +2 "$tmpfile" | grep -E '[^[:space:]]' | while IFS= read -r line; do
-                [ "$nologger" -eq 0 ] && logger -t "$logheader" "$line"
-        done
-        cat "$tmpfile"
     fi
 
     rm -f "$tmpfile"
-    return 0
+
+    # Return 0 if OK, 1 if failed
+    [ "$result" = "OK" ] && return 0 || return 1
 }
 
-# Apply cell lock with fall-back
-qnwlock_with_check() {
+# Function to wait for the modem to be ready
+wait_for_modem() {
+    log "Waiting for the device $ttyport to be ready..."
+    wait_start=$(date +%s)
+    while [ ! -e "$ttyport" ]; do
+        now=$(date +%s)
+        elapsed=$((now-wait_start))
+        if [ $elapsed -ge $ttyport_timeout ]; then
+            log "Error: Timeout - $ttyport not detected!"
+            return 1
+        fi
+        sleep "$sleep_interval"
+    done
+    log "Device $ttyport is ready!"
+}
 
+# Function to wait for the modem to respond to the AT command
+wait_for_modem_response() {
+    log "Checking if the modem responds to \"AT\" command..."
+    retries=0
+    while [ $retries -lt $max_retries ]; do
+        send_at "AT"
+        if [ $? -eq 0 ]; then
+            return 0
+        fi
+        retries=$((retries + 1))
+        log "Attempt $retries of $max_retries... Modem not responding yet."
+        sleep "$interval_between_retries"
+    done
+    log "Error: The modem did not respond to AT command after $max_retries attempts."
+    return 1
+}
+
+# Restart modem and cycle WAN
+restart_modem_and_cycle_wan() {
+    log "Blocking watchdog and restarting modem..."
+    touch "$watchdog_block_file"
+    log "Execute ifdown wan..."
+    ifdown wan
+    sleep 5
+    log "Send: \"AT+CFUN=1,1\" ..."
+    send_at "AT+CFUN=1,1" || true
+    wait_for_modem || return 1
+    wait_for_modem_response || return 1
+    log "Execute ifup wan..."
+    ifup wan
+    sleep "$wait_atter_ifup"
+}
+
+# Check LTE connectivity with ping
+check_lte_connection() {
+    timeout=${1:-$ping_connection_timeout}
+    interval=${2:-$ping_interval}
+    elapsed=0
+
+    while [ $elapsed -lt $timeout ]; do
+        if ping -c 1 -W 1 "$ping_target" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+    return 1
+}
+
+# Smart QNWLOCK handler with fallback
+handle_smart_qnwlock() {
     lock_cmd="$1"
-    fallback_command='AT+QNWLOCK="common/4g",0'
+    fallback_cmd='AT+QNWLOCK="common/4g",0'
 
-    logger -t "$logheader" "smart-qnwlock: applying lock via: $orig_command"
+    log "Start handel_smart_qnwlock..."
+    restart_modem_and_cycle_wan || exit 1
+
+    log "Applying QNWLOCK: $lock_cmd"
     send_at "$lock_cmd" "$delaytime" "$orig_command"
-    
-    elapsed=0
-    while [ $elapsed -lt $qnwlock_max_wait ]; do
-        ping -c 1 -W 1 "$ping_target" >/dev/null 2>&1 && break
-        sleep "$qnwlock_ping_interval"
-        elapsed=$((elapsed + qnwlock_ping_interval))
-    done
+    sleep 5
 
-    if ping -c 2 -W 1 "$ping_target" >/dev/null 2>&1; then
-        logger -t "$logheader" "smart-qnwlock: LTE connected successfully after cell-lock activation (${elapsed}s)"
-        return 0
-    fi
-
-    logger -t "$logheader" "smart-qnwlock: LTE failed after lock, applying fallback"
-
-    send_at "$fallback_command" "$delaytime" "$fallback_command"
-
-    elapsed=0
-    while [ $elapsed -lt $qnwlock_max_wait ]; do
-        ping -c 1 -W 1 "$ping_target" >/dev/null 2>&1 && break
-        sleep "$qnwlock_ping_interval"
-        elapsed=$((elapsed + qnwlock_ping_interval))
-    done
-
-    if ping -c 2 -W 1 "$ping_target" >/dev/null 2>&1; then
-        logger -t "$logheader" "smart-qnwlock: LTE connected successfully after fallback (${elapsed}s)"
-        return 0
+    log "Waiting for LTE connection..."
+    if check_lte_connection; then
+        log "LTE connected successfully after QNWLOCK"
     else
-        logger -t "$logheader" "smart-qnwlock: LTE failed after fallback"
-        return 12
+        log "LTE failed after QNWLOCK, applying fallback"
+        send_at "$fallback_cmd" "$delaytime" "fallback"
+        if check_lte_connection; then
+            log "LTE connected successfully after fallback"
+        else
+            log "LTE failed after fallback"
+            rm -f "$watchdog_block_file"
+            exit 12
+        fi
     fi
+
+    rm -f "$watchdog_block_file"
+    log "Watchdog block removed. Process completed."
 }
 
-# Parse arguments
+# Save the original command for logging
+orig_command="$0"
+for arg in "$@"; do
+    orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
+done
+
+# Argument Parsing
 while [ $# -gt 0 ]; do
     case "$1" in
         -a|--at)
@@ -284,8 +361,36 @@ done
 # validations that the AT command was provided
 if [ -z "$atcommand" ]; then
     echo "ERROR: missing AT command"
-    echo
     usage
+fi
+
+# Check if picocom is installed
+if ! command -v picocom > /dev/null; then
+    echo "Error: picocom is not installed. Please install it to run this script."
+    exit 1
+fi
+
+# Check if the AT port (ttyport) exists
+if [ ! -e "$ttyport" ]; then
+    echo "Error: AT port $ttyport not found."
+    exit 2
+fi
+
+# Check if $atcmd_dir directory exists, if not, create it
+mkdir -p "$atcmd_dir" || { echo "Error: Unable to create $atcmd_dir directory."; exit 8; }
+
+# Check compatibility with ModemManager
+lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
+if [ "$lteproto" -eq 1 ]; then
+    echo "Error: Script not compatible with \"ModemManager\""
+    exit 3
+fi
+
+# Check if atcmd is blocked by watchdog_mbim
+atcmd_block_file="/tmp/watchdog/atcmd_block"
+if [ -f "$atcmd_block_file" ]; then
+    echo "I can't give at commands, the file $atcmd_block_file exists"
+    exit 4
 fi
 
 # validate delaytime numeric
@@ -301,7 +406,7 @@ if [ -n "$savefile" ]; then
     # Check if the savefile path starts with the atcmd_dir
         case "$savefile" in
                 "$atcmd_dir"*) 
-                ;;  # valido, continua
+                ;;
                 *)
                 echo "ERROR: output file $savefile must be inside $atcmd_dir"
                 exit 8
@@ -316,21 +421,37 @@ if [ -n "$savefile" ]; then
     fi
 fi
 
-# smart qnwlock handling
+# Smart QNWLOCK
 if [ "$smart_qnwlock" -eq 1 ]; then
     case "$atcommand" in
         AT+QNWLOCK=\"common/4g\",[1-9]*)
-        qnwlock_with_check "$atcommand"
-        exit $?
-        ;;
+            # Valid command: execute smart QNWLOCK with modem/WAN restart and LTE fallback
+            handle_smart_qnwlock "$atcommand"
+            exit 0
+            ;;
+        AT+QNWLOCK=\"common/4g\",0|AT+QNWLOCK=\"common/4g\")
+            # Command with n=0 or missing: execute as standard QNWLOCK command
+            echo "Notice: -S option ignored. Executing standard QNWLOCK command."
+            send_at "$atcommand"
+            exit $?
+            ;;
         *)
-        echo "Error: --smart-qnwlock requires AT+QNWLOCK=\"common/4g\",<n>"
-        exit 9
-        ;;
+            # Any other invalid command: show error
+            echo "Error: invalid AT+QNWLOCK command"
+            exit 9
+            ;;
     esac
+fi
+
+# CFUN restart
+if [ "$atcommand" = "AT+CFUN=1,1" ]; then
+    restart_modem_and_cycle_wan || exit 1
+    sleep "$wait_after_cfun"
+    rm -f "$watchdog_block_file"
+    log "Watchdog block removed. Modem restart process completed."
+    exit 0
 fi
 
 # standard at execution
 send_at "$atcommand"
 exit $?
-
