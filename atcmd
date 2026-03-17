@@ -2,16 +2,17 @@
 # atcmd - AT command utility for LTE modems on OpenWrt
 # Supports smart QNWLOCK, modem/WAN restart, LTE connectivity checks, and logging
 
+# Debug only
 #set -x
+#set -e
 
 logheader="atcmd"
 atcmd_dir="/tmp/atcmd/"
-lockfile="/tmp/watchdog/atcmd.lock"
+usage_file="/root/bin/atcmd.usage" # Usage file
 nologger=0
 delaytime="600"
 atcommand=""
 savefile=""
-tmpfile=""
 
 # Device port
 ttyport="/dev/ttyUSB2"
@@ -29,199 +30,201 @@ ping_servers="8.8.8.8 9.9.9.9 1.1.1.1"              # List ping server
 ping_interval=2                                     # Interval between successive pings
 watchdog_block_file="/tmp/watchdog/watchdog.block"  # watchdog block execution
 
-# ---------------------------------------------------------------------------------------------------
+# Temp files
+tmpfile=""
+tmpfile1=""
+tmpfile2=""
 
-# Check if another instance is running
-if [ -f "$lockfile" ]; then
-    echo "Error: Another instance of atcmd is already running."
-    echo "       Please kill -9 another instance and remove $lockfile."
-    exit 1
+# Path to the PID file that will store the current process ID
+pidfile="/tmp/atcmd.pid"
+
+# Check if the PID file already exists
+if [ -f "$pidfile" ]; then
+    # Read the old PID from the file
+    oldpid=$(cat "$pidfile")
+
+    # Check if a process with that PID is still running
+    if kill -0 "$oldpid" 2>/dev/null; then
+        # If the process exists, another instance is running exit
+        echo "Another instance ($oldpid) is already running"
+        exit 1
+    else
+        # If the process doesn't exist, the PID file is stale remove it
+        echo "Stale PID file found, removing..."
+        rm -f "$pidfile"
+    fi
 fi
 
-# Create the lock file
-touch "$lockfile"
+# Save the current script's PID into the PID file
+echo $$ > "$pidfile"
 
 # Cleanup function
 cleanup() {
-    # Remove the lock file
-    [ -f "$lockfile" ] && rm -f "$lockfile"
+    # Remove PID file
+    [ -f "$pidfile" ] && rm -f "$pidfile"
+
+    # Remove Temp files only if they exist
     [ -n "$tmpfile" ] && [ -f "$tmpfile" ] && rm -f "$tmpfile"
+    [ -n "$tmpfile1" ] && [ -f "$tmpfile1" ] && rm -f "$tmpfile1"
+    [ -n "$tmpfile2" ] && [ -f "$tmpfile2" ] && rm -f "$tmpfile2"
+
+    # Remove watchdog block file
+    [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file"
 }
 
-# Ensure lock file is removed on exit or interruption
-# EXIT  -> normal termination
-# INT   -> Ctrl+C interruption
-# TERM  -> termination signal from system
-trap 'cleanup; exit' EXIT INT TERM
+# Set up a trap to remove the PID file on exit or interruption
+# Signals handled: EXIT (normal exit), INT (Ctrl+C), TERM (termination)
+trap 'cleanup' EXIT INT TERM
 
-# ---------------------------------------------------------------------------------------------------
+# Save the original command for eventuale logging
+orig_command="$0"
+for arg in "$@"; do
+    orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
+done
+
+# Check if picocom is installed
+if ! command -v picocom > /dev/null; then
+    echo "Error: picocom is not installed. Please install it to run this script."
+    exit 1
+fi
+
+# Check if the AT port (ttyport) exists
+if [ ! -e "$ttyport" ]; then
+    echo "Error: AT port $ttyport not found."
+    exit 2
+fi
+
+# Check if $atcmd_dir directory exists, if not, create it
+mkdir -p "$atcmd_dir" || { echo "Error: Unable to create $atcmd_dir directory."; exit 8; }
+
+# Check if /tmp/watchdog/ directory exists, if not, create it
+mkdir -p "/tmp/watchdog/" || { echo "Error: Unable to create \"/tmp/watchdog/\" directory."; exit 8; }
+
+# Check compatibility with ModemManager
+lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network || true)
+if [ "$lteproto" -eq 1 ]; then
+    echo "Error: Script not compatible with \"ModemManager\""
+    exit 3
+fi
+
+# Check if atcmd is blocked by watchdog_mbim
+atcmd_block_file="/tmp/watchdog/atcmd_block"
+if [ -f "$atcmd_block_file" ]; then
+    echo "I can't give at commands, the file $atcmd_block_file exists"
+    exit 4
+fi
 
 # Usage
 usage() {
-cat <<'EOF'
-========================================================================================
-                            AT Command Utility - Usage Guide
----------------------------------------------------------------------------------------
- WARNING: Use with caution! If you are not sure what a command does DO NOT EXECUTE IT.
----------------------------------------------------------------------------------------
+    if [ ! -f "$usage_file" ]; then
+        echo "ERROR: usage file not found: $usage_file"
+        exit 1
+    fi
 
-Usage:
-  atcmd [options] "AT-COMMAND"
+    awk '/^Examples:/ {exit} {print}' "$usage_file"
 
-Options:
-  -a, --at              AT command
-  -d, --delay <ms>      Delay in milliseconds (default: 600)
-  -o, --output <file>   Save output (only /tmp/atcmd/)
-  -n, --no-log          Disable syslog logging
-  -S, --smart-qnwlock   Apply SMART QNWLOCK procedure:
-                        - If AT+QNWLOCK="common/4g",[1-9]*: restart modem, cycle WAN, check LTE automatically.
-                        - If AT+QNWLOCK="common/4g",0: check if any cell-locks active. SMART procedure runs only if needed.
-                        - If AT+QNWLOCK="common/4g": executes only the standard AT command; no SMART procedure.
-  -C, --smart-cfun      Execute SMART CFUN procedure (AT+CFUN=1,1) with modem restart, WAN cycle, and LTE connectivity check.
-                        Does not accept additional AT commands.
-  -h, --help            Show this help
-
-
-Notes:
-
-  - If -a/--at is omitted, the first non-option argument is treated as the AT command.
-  - The default AT port is /dev/ttyUSB2.
-  - This utility is not compatible with ModemManager.
-  - Output files are restricted to /tmp/atcmd/ for safety reasons.
-  - AT commands are blocked if /tmp/watchdog/atcmd_block exists.
-
-Warning:
-
-  - Many AT commands modify persistent modem settings (NVRAM).
-  - Some commands may cause loss of network connectivity or remote access.
-  - Some commands require a longer delay (-d) to return complete output.
-  - Commands that do not return 'OK' may be reported as failed.
-  - Commands and responses are logged to syslog by default (use -n to disable).
-
-Warning - special commands:
-  - Using -S with AT+QNWLOCK will restart the modem, restart WAN, and check LTE automatically.
-    Only effective when <n> >= 1; otherwise executes as standard QNWLOCK.
-  - Using AT+CFUN=1,1 will automatically restart the modem, cycle the WAN interface,
-    wait for modem readiness, and then resume operation to ensure LTE connectivity.
-
-Examples:
-
-# Basic AT Commands
-atcmd 'AT';           # Basic communication test (equivalent to: atcmd -a 'AT')
-atcmd 'ATI';          # Show device information (equivalent to: atcmd -a 'ATI')
-atcmd 'AT+CVERSION';  # Show firmware version
-atcmd 'AT+QGMR?';     # Show extended firmware version
-atcmd 'ATI1';         # Enable the "echo" mode or use 'ATI0' to disable it
-atcmd 'AT&W';         # Save all current settings to non-volatile memory (retains them after reboot)
-
-# PDP Context Management
-atcmd 'AT+CGDCONT?';      # Show defined PDP contexts
-atcmd 'AT+CGACT?';        # Show active PDP contexts
-atcmd 'AT+CGACT=0,1';     # Deactivate PDP context 1
-atcmd 'AT+CGATT?';        # Check if modem is attached to network
-
-# SIM Status
-atcmd 'AT+CPIN?';      # Check SIM status (READY, PIN required, etc.)
-atcmd 'AT+CCID';       # Show SIM CCID (only works if SIM is inserted)
-
-# Network Information
-atcmd 'AT+CGPADDR=1';     # Show current IP address
-atcmd 'AT+CSQ';           # Show signal quality [ atcmd -d 500 -a 'AT+CSQ'; # Delay 500ms ]
-atcmd 'AT+QRSRP';         # Show RSRP signal level
-atcmd 'AT+CEREG?';        # Check LTE network registration
-atcmd 'AT+COPS?';         # Query current registered operator and access technology (7=LTE, 2=UMTS, 0=GSM)
-
-# Primary Cell Info
-atcmd 'AT+QENG="servingcell"';      # Show serving cell info
-atcmd 'AT+QNETINFO="servingcell"';  # Show current network info
-
-# Neighboring Cells Info
-atcmd 'AT+QENG="neighbourcell"';    # Show neighbouring cells
-
-# Carrier Aggregation
-atcmd 'AT+QCAINFO';                 # Show carrier aggregation info, Requires active data traffic; otherwise returns "OK" only
-
-# SMS Storage / Voice Function
-atcmd 'AT+CPMS?';                                # Show current SMS storage
-atcmd 'AT+CPMS="ME","ME","ME"'; atcmd 'AT+CSAS'; # Set and save SMS storage to ME
-atcmd 'AT+QCFG="call_control",1,1';              # Disable voice call support
-
-# LTE Bands
-atcmd 'AT+QCFG="band",0,5,1';                   # Use LTE bands 1+3 only
-atcmd 'AT+QCFG="band",0,45,1';                  # Use LTE bands 1+3+7 only
-atcmd 'AT+QCFG="band",0,80045,1';               # Use LTE bands 1+3+7+20 only
-atcmd 'AT+QCFG="band",8d0,1A0080800D5,1';       # Enable all supported LTE bands (EG18-EA)
-
-# USB / Network Interface
-atcmd 'AT+QCFG="usbnet"';                             # Show USB network type (0=qmi, 1=ecm, 2=mbim) ** WARNING: mode 3=RNDIS is NOT supported on Linux, only Windows **
-atcmd 'AT+QCFG="usbcfg",0x2C7C,0x0512,1,1,1,1,1,1,0'; # Enable ADB interface
-
-# Modem Control
-atcmd 'AT+QPOWD=1';      # Power off the LTE modem
-atcmd 'AT+CFUN=1,1';     # Soft reboot modem and enable radio (full restart) whitout check
-atcmd 'AT+QTEMP';        # Show modem temperature
-
----------------------------------------------------------------------------------------
-
-# Standard AT+QNWLOCK commands
-atcmd 'AT+QNWLOCK="common/4g"';            # Show current cell lock status
-atcmd 'AT+QNWLOCK="common/4g",0';          # Disable cell lock whitout check or fallback
-atcmd 'AT+QNWLOCK="common/4g",1,1650,100'; # Single cell lock whitout check or fallback
-
----------------------------------------------------------------------------------------
-
-# Smart QNWLOCK Examples (-S)
-
-# SMART QNWLOCK performs the following steps automatically:
-# 1. Blocks the watchdog to prevent interference from automatic recovery scripts.
-# 2. Sends the AT command passed by the user (if it specifies a cell lock > 0).
-# 3. Restarts the modem (AT+CFUN=0 then AT+CFUN=1) to apply changes.
-# 4. Cycles the WAN interface (ifdown/ifup) to refresh network connectivity.
-# 5. Waits for LTE registration and interface readiness.
-# 6. Checks PDP IP and interface IPv4 address.
-# 7. Runs ping tests to verify LTE connectivity.
-# 8. Logs results and unblocks the watchdog.
-
-# SMART QNWLOCK only executes the full procedure if cell-locks are active.
-# If the cell-lock is 0 or not present, it will just execute the standard AT command.
-
-# Smart QNWLOCK examples
-atcmd -S 'AT+QNWLOCK="common/4g"'                             # Execute standard command only
-atcmd -S 'AT+QNWLOCK="common/4g",0'                           # Execute SMART only if cell-locks are active
-atcmd -S 'AT+QNWLOCK="common/4g",1,1650,100;                  # Monte Bondone Cima Palon 230131 or 231131
-atcmd -S 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Cima Palon 230131 or 231131
-
----------------------------------------------------------------------------------------
-
-# Smart CFUN Example (-C)
-
-# SMART CFUN performs a full modem restart and connectivity verification:
-# 1. Blocks the watchdog to prevent interference.
-# 2. Sends AT+CFUN=1,1 to perform a soft modem restart.
-# 3. Waits for the modem device (/dev/ttyUSB2) to be ready.
-# 4. Checks if the modem responds to basic "AT" commands.
-# 5. Cycles the WAN interface (ifdown/ifup) to refresh network connectivity.
-# 6. Waits for LTE registration and interface readiness.
-# 7. Verifies PDP IP address assigned by the modem.
-# 8. Confirms that the network interface has an IPv4 address.
-# 9. Performs ping tests to ensure LTE connectivity.
-# 10. Logs results to syslog and terminal.
-# 11. Unblocks the watchdog at the end of the procedure.
-#
-# Notes:
-#  - SMART CFUN is always executed with AT+CFUN=1,1; no additional AT commands can be passed with -C.
-#  - Intended to restore LTE connectivity automatically.
-#  - The full procedure may take up to 2 minutes depending on modem registration and WAN cycle.
-
-atcmd -C  # Execute SMART CFUN restart procedure
-
-========================================================================================
-EOF
-echo "Current date: $(date)"
-exit 0
+    echo
+    echo "Tip: use --help-full to see full documentation and examples"
+    echo "Current date: $(date)"
 }
 
-# ---------------------------------------------------------------------------------------------------
+# Usage_full
+usage_full() {
+    if [ ! -f "$usage_file" ]; then
+        echo "ERROR: usage file not found: $usage_file"
+        exit 1
+    fi
+
+    if [ -t 1 ] && command -v less >/dev/null; then
+        less "$usage_file"
+    else
+        cat "$usage_file"
+    fi
+
+    echo
+    echo "Current date: $(date)"
+}
+
+# Argument Parsing
+if [ $# -eq 0 ]; then
+    usage
+    exit 1
+fi
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -a|--at)
+            shift
+            if [ $# -eq 0 ] || [ "${1#-}" != "$1" ]; then
+                echo "Error: missing AT command after -a"
+                exit 1
+            fi
+            atcommand="$1"
+            ;;
+        -d|--delay)
+            shift
+            if [ $# -eq 0 ] || [ "${1#-}" != "$1" ]; then
+                echo "Error: missing value for -d"
+                exit 1
+            fi
+            delaytime="$1"
+            ;;
+        -o|--output)
+            shift
+            if [ $# -eq 0 ] || [ "${1#-}" != "$1" ]; then
+                echo "Error: missing file path for -o"
+                exit 1
+            fi
+            savefile="$1"
+            ;;
+        -n|--no-log)
+            nologger=1
+            ;;
+        -S|--smart-qnwlock)
+            smart_qnwlock=1
+            ;;
+        -C|--smart-cfun)
+            smart_cfun=1
+            shift
+            continue
+            ;;
+        -h|-help|--help|help)
+            usage
+            exit 0
+            ;;
+        -help-full|--help-full|help-full)
+            usage_full
+            exit 0
+            ;;
+        *)
+            if [ -z "$atcommand" ]; then
+                atcommand="$1"
+            else
+                echo "Unknown option or extra argument: $1"
+                if [ -f "$usage_file" ]; then
+                    awk '/^Notes:/ {exit} {print}' "$usage_file"
+                else
+                    echo "WARNING: usage file not found ($usage_file)"
+                fi
+                exit 1
+            fi
+            ;;
+    esac
+    shift
+done
+
+# Validation: an AT command is required UNLESS smart mode is active
+if [ -z "$atcommand" ] && [ "$smart_cfun" -ne 1 ] && [ "$smart_qnwlock" -ne 1 ]; then
+    echo "ERROR: No AT command provided and no Smart Mode enabled."
+    echo "Usage: $0 [AT_COMMAND] or use -S / -C flags."
+    echo
+    if [ -f "$usage_file" ]; then
+        awk '/^Notes:/ {exit} {print}' "$usage_file"
+    else
+        echo "WARNING: usage file not found ($usage_file)"
+    fi
+    exit 1
+fi
 
 # Logging
 log() {
@@ -248,7 +251,15 @@ log_multiline() {
 send_at() {
     at="$1"
     delay="${2:-$delaytime}"
-    tmpfile=$(mktemp)
+
+    # Use $3 if provided. Otherwise, create a temporary file.
+    is_external_file=0
+    if [ -n "$3" ]; then
+        tmpfile="$3"
+        is_external_file=1
+    else
+        tmpfile=$(mktemp)
+    fi
 
     # Prepare AT command string with CR/LF
     atstring=$(printf "%s\r\n" "$at")
@@ -277,7 +288,10 @@ send_at() {
         cat "$tmpfile" >> "$savefile"
     fi
 
-    rm -f "$tmpfile"
+    # Only delete the file if it was NOT provided as an argument ($3)
+    if [ "$is_external_file" -eq 0 ]; then
+        rm -f "$tmpfile"
+    fi
 
     # Return 0 if OK, 1 if failed
     [ "$result" = "OK" ] && return 0 || return 1
@@ -304,8 +318,7 @@ wait_for_modem_response() {
     log "Checking if the modem responds to \"AT\" command..."
     retries=0
     while [ $retries -lt $max_retries ]; do
-        send_at "AT"
-        if [ $? -eq 0 ]; then
+        if send_at "AT"; then
             return 0
         fi
         retries=$((retries + 1))
@@ -316,9 +329,23 @@ wait_for_modem_response() {
     return 1
 }
 
-# Watchdog Block/Unblock
-block_watchdog() { touch "$watchdog_block_file"; log "Watchdog blocked"; }
-unblock_watchdog() { rm -f "$watchdog_block_file"; log "Watchdog unblocked"; }
+# Watchdog Block
+block_watchdog() {
+    if [ ! -f "$watchdog_block_file" ]; then
+        touch "$watchdog_block_file"
+        watchdog_locked=1
+        log "Watchdog blocked (created by this script)"
+    else
+        watchdog_locked=0
+        log "Watchdog already blocked (not owned)"
+    fi
+}
+
+# Watchdog Unblock
+unblock_watchdog() {
+    rm -f "$watchdog_block_file"
+    log "Watchdog unblocked"
+}
 
 # Restart modem
 restart_modem() {
@@ -376,16 +403,16 @@ check_lte_connection() {
     fi
 
     log "Checking PDP IP address..."
-    tmpfile=$(mktemp)
-    picocom "$ttyport" --exit-after 500 --quiet -t "$(printf "AT+CGPADDR=1\r\n")" --logfile "$tmpfile" >/dev/null 2>&1
-    pdp_ip=$(grep -oE '\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\b' "$tmpfile")
+    tmpfile2=$(mktemp)
+    picocom "$ttyport" --exit-after 500 --quiet -t "$(printf "AT+CGPADDR=1\r\n")" --logfile "$tmpfile2" >/dev/null 2>&1
+    pdp_ip=$(grep -oE '\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\b' "$tmpfile2")
     if [ -z "$pdp_ip" ]; then
         log "No IP address assigned to PDP context."
-        rm -f "$tmpfile"
+        rm -f "$tmpfile2"
         return 1
     else
         log "PDP IP address detected: $pdp_ip"
-        rm -f "$tmpfile"
+        rm -f "$tmpfile2"
     fi
 
     log "Checking IPv4 on interface..."
@@ -441,95 +468,6 @@ smart_restart_procedure() {
     unblock_watchdog
 }
 
-# Save the original command for eventuale logging
-orig_command="$0"
-for arg in "$@"; do
-    orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
-done
-
-# Argument Parsing
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -a|--at)
-            shift
-            [ -z "$1" ] && { echo "Error: missing AT command after -a"; exit 1; }
-            atcommand="$1"
-            ;;
-        -d|--delay)
-            shift
-            [ -z "$1" ] && { echo "Error: missing value for -d"; exit 1; }
-            delaytime="$1"
-            ;;
-        -o|--output)
-            shift
-            [ -z "$1" ] && { echo "Error: missing file path for -o"; exit 1; }
-            savefile="$1"
-            ;;
-        -n|--no-log)
-            nologger=1
-            ;;
-        -S|--smart-qnwlock)
-            smart_qnwlock=1
-            ;;
-        -C|--smart-cfun)
-            smart_cfun=1
-            shift
-            continue
-            ;;
-        -h|--help)
-            usage
-            ;;
-        *)
-            if [ -z "$atcommand" ]; then
-                atcommand="$1"
-            else
-                echo "Unknown option or extra argument: $1"
-                usage
-            fi
-            ;;
-    esac
-    shift
-done
-
-# Validation: an AT command is required UNLESS smart mode is active
-if [ -z "$atcommand" ] && [ "${smart_cfun:-0}" -ne 1 ] && [ "${smart_qnwlock:-0}" -ne 1 ]; then
-    echo "ERROR: No AT command provided and no Smart Mode enabled."
-    echo "Usage: $0 [AT_COMMAND] or use -S / -C flags."
-    exit 1
-fi
-
-# Check if picocom is installed
-if ! command -v picocom > /dev/null; then
-    echo "Error: picocom is not installed. Please install it to run this script."
-    exit 1
-fi
-
-# Check if the AT port (ttyport) exists
-if [ ! -e "$ttyport" ]; then
-    echo "Error: AT port $ttyport not found."
-    exit 2
-fi
-
-# Check if $atcmd_dir directory exists, if not, create it
-mkdir -p "$atcmd_dir" || { echo "Error: Unable to create $atcmd_dir directory."; exit 8; }
-
-# Check if /tmp/watchdog/ directory exists, if not, create it
-mkdir -p "/tmp/watchdog/" || { echo "Error: Unable to create \"/tmp/watchdog/\" directory."; exit 8; }
-
-# Check compatibility with ModemManager
-lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
-if [ "$lteproto" -eq 1 ]; then
-    echo "Error: Script not compatible with \"ModemManager\""
-    exit 3
-fi
-
-# Check if atcmd is blocked by watchdog_mbim
-atcmd_block_file="/tmp/watchdog/atcmd_block"
-if [ -f "$atcmd_block_file" ]; then
-    echo "I can't give at commands, the file $atcmd_block_file exists"
-    exit 4
-fi
-
 # validate delaytime numeric
 case "$delaytime" in
     ''|*[!0-9]*)
@@ -559,6 +497,7 @@ if [ "$smart_cfun" -eq 1 ]; then
     if [ -n "$atcommand" ]; then
         echo "Error: \"-C\" \"--smart-cfun\" does not accept AT commands"
         usage
+        exit 1
     fi
     log "Executing SMART CFUN restart procedure..."
     smart_restart_procedure "SMART CFUN" "AT+CFUN=1,1"
@@ -575,12 +514,12 @@ if [ "$smart_qnwlock" -eq 1 ]; then
             ;;
         AT+QNWLOCK=\"common/4g\",0)
             # Check if there are actually any active cell-locks
-            tmpfile=$(mktemp)
-            send_at 'AT+QNWLOCK="common/4g"' "$delaytime" "$tmpfile"
-            celllock_status=$(grep -oE '\+QNWLOCK: "common/4g",[0-9]+' "$tmpfile" | cut -d',' -f2)
-            rm -f "$tmpfile"
+            tmpfile1=$(mktemp)
+            send_at 'AT+QNWLOCK="common/4g"' "$delaytime" "$tmpfile1"
+            celllock_status=$(grep -oE '\+QNWLOCK: "common/4g",[0-9]+' "$tmpfile1" | cut -d',' -f2)
+            rm -f "$tmpfile1"
 
-            if [ "$celllock_status" != "0" ]; then
+            if echo "$celllock_status" | grep -qv '^0$'; then
                 # Cell Lock active, executing smart procedure
                 log "Cell-locks detected; executing SMART QNWLOCK procedure"
                 smart_restart_procedure "QNWLOCK" "$atcommand"
@@ -604,10 +543,4 @@ fi
 
 # standard at execution
 send_at "$atcommand"
-status_end=$?
-
-# Cleanup
-cleanup
-
-# Exit status at command
-exit $status_end
+exit $?
