@@ -40,7 +40,7 @@ If you want scripts copied to /root/bin to be available globally, add it to the 
 
 ```sh
 mkdir -p /root/bin
-sudo sed -i 's|^export PATH=".*"|export PATH="/usr/sbin:/usr/bin:/sbin:/bin:/root/bin"|' /etc/profile
+sed -i 's|^export PATH=".*"|export PATH="/usr/sbin:/usr/bin:/sbin:/bin:/root/bin"|' /etc/profile
 echo "/etc/profile" >> /etc/sysupgrade.conf
 echo "/root/" >> /etc/sysupgrade.conf
 cp /tmp/bin/cell_band /tmp/bin/cell_info /root/bin/
