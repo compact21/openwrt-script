@@ -1,7 +1,7 @@
 #!/bin/sh
 
 ping_server="9.9.9.9"
-max_wait=120 # second
+max_wait=120 # seconds
 
 # Check ModemManager
 lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
@@ -9,6 +9,9 @@ lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
 
 verbose=0
 traffic_mode="ping"
+traffic_pid=""
+file=""
+temp_download=""
 
 # Help function
 usage() {
@@ -45,13 +48,13 @@ done
 # Function: convert LTE bandwidth code to MHz
 bw_to_mhz() {
     case $1 in
-        6) echo 1.4 ;;
-        15) echo 3 ;;
-        25) echo 5 ;;
-        50) echo 10 ;;
-        75) echo 15 ;;
+        6)   echo 1.4 ;;
+        15)  echo 3 ;;
+        25)  echo 5 ;;
+        50)  echo 10 ;;
+        75)  echo 15 ;;
         100) echo 20 ;;
-        *) echo 0 ;;
+        *)   echo 0 ;;
     esac
 }
 
@@ -61,11 +64,14 @@ cleanup() {
     [ -n "$file" ] && rm -f "$file"
     [ -n "$temp_download" ] && rm -f "$temp_download"
 }
-trap cleanup INT TERM
+
+# Trap CTRL+C, kill and normal exit
+trap 'echo; echo "Interrupted. Cleaning up..."; cleanup; exit 1' INT TERM
+trap 'cleanup' EXIT
 
 start_epoch=$(date +%s)
 
-# Generate traffic
+# Generate traffic to trigger Carrier Aggregation
 if [ "$traffic_mode" = "ping" ]; then
     [ "$verbose" -eq 1 ] && echo "Starting ping to $ping_server"
     ping "$ping_server" > /dev/null 2>&1 &
@@ -82,17 +88,18 @@ fi
 [ "$verbose" -eq 1 ] && echo "Waiting 5 seconds before sending AT+QCAINFO..."
 sleep 5
 
-# Send AT+QCAINFO command and save output, with $max_wait timeout
+# Poll AT+QCAINFO until valid response or timeout
 file=$(mktemp)
 while true; do
     picocom -t "$(printf 'AT+QCAINFO\r\n')" "/dev/ttyUSB2" --nolock --exit-after "300" --quiet --logfile "$file" > /dev/null 2>&1
     grep -q '+QCAINFO:' "$file" && break
     elapsed=$(( $(date +%s) - start_epoch ))
-    [ "$elapsed" -ge "$max_wait" ] && { echo "Timeout reached ($max_wait)s"; break; }
+    [ "$elapsed" -ge "$max_wait" ] && { echo "Timeout reached ($max_wait)s"; exit 1; }
     sleep 2
 done
 
 kill "$traffic_pid" 2>/dev/null || true
+traffic_pid=""
 
 # Extract and display PCC/SCC bands from modem output
 grep '+QCAINFO:' "$file"
@@ -103,7 +110,7 @@ pcc_count=0
 line_out=""
 
 while IFS= read -r line; do
-    echo "$line" | grep -qi '+QCAINFO:' || continue
+    echo "$line" | grep -q '+QCAINFO:' || continue
     type=$(echo "$line" | cut -d',' -f1 | tr -d '"')
     bw_code=$(echo "$line" | cut -d',' -f3 | tr -d '"')
     band=$(echo "$line" | cut -d',' -f4 | tr -d '"')
@@ -131,5 +138,3 @@ echo "Total aggregated bandwidth: $total MHz"
 end_epoch=$(date +%s)
 duration=$((end_epoch - start_epoch))
 [ "$verbose" -eq 1 ] && echo "Elapsed time: ${duration} seconds"
-
-cleanup
