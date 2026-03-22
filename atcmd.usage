@@ -8,26 +8,33 @@ Usage:
   atcmd [options] "AT-COMMAND"
 
 Options:
-  -a, --at                     AT command
-  -d, --delay <ms>             Delay in milliseconds (default: 600)
-  -o, --output <file>          Save output (only /tmp/atcmd/)
-  -n, --no-log                 Disable syslog logging
-  -S, --smart-qnwlock          Apply SMART QNWLOCK procedure:
-                                - If AT+QNWLOCK="common/4g",[1-9]*: restart modem, cycle WAN, check LTE automatically.
-                                - If AT+QNWLOCK="common/4g",0: check if any cell-locks active. SMART procedure runs only if needed.
-                                - If AT+QNWLOCK="common/4g": executes only the standard AT command; no SMART procedure.
-  -C, --smart-cfun             Execute SMART CFUN procedure (AT+CFUN=1,1) with modem restart, WAN cycle, and LTE connectivity check.
-                               Does not accept additional AT commands.
-  -h, --help, help             Show this help (brief usage)
-  --help-full, help-full       Show full documentation with examples
+  -a, --at             AT command
+  -d, --delay <ms>     Delay in milliseconds (default: 600)
+  -o, --output <file>  Save output (only /tmp/atcmd/)
+  -n, --no-log         Disable syslog logging
+
+  -S, --smart-qnwlock  Apply SMART QNWLOCK procedure:
+                        - If AT+QNWLOCK="common/4g",[1-9]*: restart modem, restart WAN, check LTE automatically.
+                        - If AT+QNWLOCK="common/4g",0: check if any cell-locks active. SMART procedure runs only if needed.
+                        - If AT+QNWLOCK="common/4g": executes only the standard AT command; no SMART procedure.
+
+  -C, --smart-cfun     Execute SMART CFUN procedure (AT+CFUN=1,1) with modem restart, WAN restart, and LTE connectivity check.
+                       Does not accept additional AT commands.
+
+  -h, --help, -help, help                      Show this help (brief usage)
+  --help-full, -help-full, help-full, full     Show full documentation with examples
 
 Notes:
 
   - If -a/--at is omitted, the first non-option argument is treated as the AT command.
   - The default AT port is /dev/ttyUSB2.
+  - The WAN interface name is configured via wan_iface at the top of the script.
   - This utility is not compatible with ModemManager.
   - Output files are restricted to /tmp/atcmd/ for safety reasons.
   - AT commands are blocked if /tmp/watchdog/atcmd_block exists.
+  - Script exits with error (exit 5) if the interface defined in wan_iface
+    is not found via ubus at startup. Edit wan_iface at the top of the script
+    to match the LTE interface name defined in /etc/config/network.
 
 Warning:
 
@@ -40,7 +47,7 @@ Warning:
 Warning - special commands:
   - Using -S with AT+QNWLOCK will restart the modem, restart WAN, and check LTE automatically.
     Only effective when <n> >= 1; otherwise executes as standard QNWLOCK.
-  - Using AT+CFUN=1,1 will automatically restart the modem, cycle the WAN interface,
+  - Using AT+CFUN=1,1 will automatically restart the modem, restart the WAN interface,
     wait for modem readiness, and then resume operation to ensure LTE connectivity.
 
 Examples:
@@ -115,11 +122,17 @@ atcmd 'AT+QNWLOCK="common/4g",1,1650,100'; # Single cell lock whitout check or f
 # 1. Blocks the watchdog to prevent interference from automatic recovery scripts.
 # 2. Sends the AT command passed by the user (if it specifies a cell lock > 0).
 # 3. Restarts the modem (AT+CFUN=0 then AT+CFUN=1) to apply changes.
-# 4. Cycles the WAN interface (ifdown/ifup) to refresh network connectivity.
+# 4. Restarts the WAN interface (ubus down/up) to refresh network connectivity.
 # 5. Waits for LTE registration and interface readiness.
 # 6. Checks PDP IP and interface IPv4 address.
 # 7. Runs ping tests to verify LTE connectivity.
 # 8. Logs results and unblocks the watchdog.
+#
+# On failure at any step after modem restart:
+#  - AT+CEER is sent to log the modem error cause for diagnostic purposes.
+#  - A fallback procedure is attempted: cell-lock is removed, modem and WAN
+#    are restarted, and connectivity is checked again.
+#  - If connectivity is not restored after fallback, script exits with code 12.
 
 # SMART QNWLOCK only executes the full procedure if cell-locks are active.
 # If the cell-lock is 0 or not present, it will just execute the standard AT command.
@@ -139,7 +152,7 @@ atcmd -S 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Ci
 # 2. Sends AT+CFUN=1,1 to perform a soft modem restart.
 # 3. Waits for the modem device (/dev/ttyUSB2) to be ready.
 # 4. Checks if the modem responds to basic "AT" commands.
-# 5. Cycles the WAN interface (ifdown/ifup) to refresh network connectivity.
+# 5. Restarts the WAN interface (ubus down/up) to refresh network connectivity.
 # 6. Waits for LTE registration and interface readiness.
 # 7. Verifies PDP IP address assigned by the modem.
 # 8. Confirms that the network interface has an IPv4 address.
@@ -147,10 +160,16 @@ atcmd -S 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Ci
 # 10. Logs results to syslog and terminal.
 # 11. Unblocks the watchdog at the end of the procedure.
 #
+# On failure at any step after modem restart:
+#  - AT+CEER is sent to log the modem error cause for diagnostic purposes.
+#  - A fallback procedure is attempted: modem and WAN are restarted, and
+#    connectivity is checked again.
+#  - If connectivity is not restored after fallback, script exits with code 12.
+#
 # Notes:
 #  - SMART CFUN is always executed with AT+CFUN=1,1; no additional AT commands can be passed with -C.
 #  - Intended to restore LTE connectivity automatically.
-#  - The full procedure may take up to 2 minutes depending on modem registration and WAN cycle.
+#  - The full procedure may take up to 2 minutes depending on modem registration and WAN restart.
 
 atcmd -C  # Execute SMART CFUN restart procedure
 
