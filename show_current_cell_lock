@@ -20,6 +20,15 @@ exit 0
 }
 
 verbose=0
+tmpfile=""
+
+# Cleanup function
+cleanup() {
+    [ -n "$tmpfile" ] && rm -f "$tmpfile"
+}
+
+# Trap CTRL+C, kill and normal exit
+trap 'cleanup' EXIT INT TERM
 
 # Parse options
 while getopts "hv" opt; do
@@ -40,7 +49,8 @@ send_at() {
     lock_line=$(grep '+QNWLOCK:' "$tmpfile")
 
     if [ -n "$lock_line" ]; then
-        if echo "$lock_line" | grep -q ',0'; then
+        # Match exactly ",0" at end of the common/4g field to avoid false positives
+        if echo "$lock_line" | grep -qE '"common/4g",0'; then
             echo "No cell lock detected"
             [ "$verbose" -eq 1 ] && { echo "Debug output:"; cat "$tmpfile"; }
         else
@@ -51,8 +61,6 @@ send_at() {
         echo "No cell lock detected"
         [ "$verbose" -eq 1 ] && { echo "Debug output:"; cat "$tmpfile"; }
     fi
-
-    rm -f "$tmpfile"
 }
 
 # Execute command
