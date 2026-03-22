@@ -2,41 +2,50 @@
 # atcmd - AT command utility for LTE modems on OpenWrt
 # Supports smart QNWLOCK, modem/WAN restart, LTE connectivity checks, and logging
 
-# Debug only
-#set -x
-#set -e
+# CONFIGURATION REQUIRED:
+wan_iface="wan"
+# set wan_iface to the LTE interface name as defined in /etc/config/network on this system.
+#
+# To find the correct name, run:
+#   uci show network | grep mbim    (or: grep qmi / grep lte)
+#   uci show network.wan            (if your interface is called "wan")
+# Examples of common interface names: wan, wwan, lte, lte0, modem
+# If the interface name is wrong or the interface does not exist yet, the script will exit with an error at startup (exit 5).
 
-logheader="atcmd"
-atcmd_dir="/tmp/atcmd/"
-usage_file="/root/bin/atcmd.usage" # Usage file
-nologger=0
-delaytime="600"
-atcommand=""
-savefile=""
+logheader="atcmd"                      # Tag used in syslog messages
+atcmd_dir="/tmp/atcmd/"                # Working directory for output files
+usage_file="/root/bin/atcmd.usage"     # Path to the usage/help text file
+nologger=0                             # Set to 1 to suppress syslog logging
+delaytime="600"                        # picocom exit-after timeout in ms
 
 # Device port
-ttyport="/dev/ttyUSB2"
-ttyport_timeout=120         # Timeout device port seconds
-sleep_interval=2            # For device polling
-max_retries=20              # Numbers retries for device port
-interval_between_retries=5  # For a simple "AT" command send
+ttyport="/dev/ttyUSB2"                 # AT command serial port exposed by the modem
+ttyport_timeout=120                    # Timeout in seconds waiting for ttyport to appear
+sleep_interval=2                       # Polling interval in seconds for ttyport detection
+max_retries=20                         # Max attempts waiting for modem AT response
+interval_between_retries=5             # Seconds between each AT response retry
 
 # Smart QNWLOCK / CFUN
-smart_qnwlock=0
-smart_cfun=0
-wait_after_cfun=40                                  # Seconds to wait after sending AT+CFUN=1,1
-wait_after_ifup=60                                  # Seconds to wait after ifup wan
-ping_servers="8.8.8.8 9.9.9.9 1.1.1.1"              # List ping server
-ping_interval=2                                     # Interval between successive pings
-watchdog_block_file="/tmp/watchdog/watchdog.block"  # watchdog block execution
+wait_after_ifup=60                     # Seconds to wait after ifup wan
+ping_servers="8.8.8.8 9.9.9.9 1.1.1.1" # Ping targets for LTE connectivity check
+ping_count=5                           # Number of ping packets per server
+ping_interval=2                        # Interval in seconds between ping packets
 
-# Temp files
-tmpfile=""
-tmpfile1=""
-tmpfile2=""
+# INTERNAL VARIABLES NOT EDIT
+# These variables are managed by the script at runtime.
+# Changing them here will break the script flow or produce undefined behaviour.
+wan_device="" # L2 device resolved at startup from wan_iface via ubus
+smart_qnwlock=0 # Set by -S flag; triggers smart QNWLOCK procedure
+smart_cfun=0 # Set by -C flag; triggers smart CFUN procedure
+atcommand="" # AT command string set by argument parsing
+savefile="" # Optional output file path set by -o flag
+atcmd_sendfile="" # Temp file for picocom output in send_at()
+atcmd_qnwlock_file="" # Temp file for AT+QNWLOCK query output
+atcmd_cereg_file="" # Temp file for AT+CEREG? poll output
+atcmd_cgpaddr_file="" # Temp file for AT+CGPADDR=1 output
+pidfile="/tmp/atcmd.pid" # PID file to prevent multiple concurrent instances
+watchdog_block_file="/tmp/watchdog/watchdog.block" # Watchdog block file path
 
-# Path to the PID file that will store the current process ID
-pidfile="/tmp/atcmd.pid"
 
 # Check if the PID file already exists
 if [ -f "$pidfile" ]; then
@@ -45,11 +54,11 @@ if [ -f "$pidfile" ]; then
 
     # Check if a process with that PID is still running
     if kill -0 "$oldpid" 2>/dev/null; then
-        # If the process exists, another instance is running exit
+        # If the process exists, another instance is running - exit
         echo "Another instance ($oldpid) is already running"
         exit 1
     else
-        # If the process doesn't exist, the PID file is stale remove it
+        # If the process doesn't exist, the PID file is stale - remove it
         echo "Stale PID file found, removing..."
         rm -f "$pidfile"
     fi
@@ -64,9 +73,10 @@ cleanup() {
     [ -f "$pidfile" ] && rm -f "$pidfile"
 
     # Remove Temp files only if they exist
-    [ -n "$tmpfile" ] && [ -f "$tmpfile" ] && rm -f "$tmpfile"
-    [ -n "$tmpfile1" ] && [ -f "$tmpfile1" ] && rm -f "$tmpfile1"
-    [ -n "$tmpfile2" ] && [ -f "$tmpfile2" ] && rm -f "$tmpfile2"
+    [ -n "$atcmd_sendfile" ] && [ -f "$atcmd_sendfile" ] && rm -f "$atcmd_sendfile"
+    [ -n "$atcmd_qnwlock_file" ] && [ -f "$atcmd_qnwlock_file" ] && rm -f "$atcmd_qnwlock_file"
+    [ -n "$atcmd_cereg_file" ] && [ -f "$atcmd_cereg_file" ] && rm -f "$atcmd_cereg_file"
+    [ -n "$atcmd_cgpaddr_file" ] && [ -f "$atcmd_cgpaddr_file" ] && rm -f "$atcmd_cgpaddr_file"
 
     # Remove watchdog block file
     [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file"
@@ -76,7 +86,11 @@ cleanup() {
 # Signals handled: EXIT (normal exit), INT (Ctrl+C), TERM (termination)
 trap 'cleanup' EXIT INT TERM
 
-# Save the original command for eventuale logging
+# Save the original command for eventual logging
+# Build the full original command string with properly escaped arguments.
+# Currently unused - was intended for use in send_at() but since send_at() is
+# called multiple times during a procedure, logging it there would be ambiguous.
+# Kept for potential future use (e.g. logging the entry point of the script).
 orig_command="$0"
 for arg in "$@"; do
     orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
@@ -114,7 +128,20 @@ if [ -f "$atcmd_block_file" ]; then
     exit 4
 fi
 
-# Usage
+# Check that wan_iface exists and resolve its L2 device via ubus.
+# This is done once at startup so wan_device is available to all functions.
+# A missing or unconfigured interface at this stage indicates a configuration
+# problem that no AT command can fix, so we exit immediately with a clear message.
+wan_device=$(ubus call network.interface."$wan_iface" status 2>/dev/null | \
+    jsonfilter -e '@.l3_device')
+if [ -z "$wan_device" ]; then
+    echo "Error: interface \"$wan_iface\" not found or not yet created."
+    echo "Check that \"$wan_iface\" exists in /etc/config/network and that the network service is running."
+    echo "Alternatively, edit this script and set the variable wan_iface to match your network configuration."
+    exit 5
+fi
+
+# Print short help reading from external file $usage_file (up to "Examples:" section)
 usage() {
     if [ ! -f "$usage_file" ]; then
         echo "ERROR: usage file not found: $usage_file"
@@ -128,7 +155,7 @@ usage() {
     echo "Current date: $(date)"
 }
 
-# Usage_full
+# Print full help reading the entire external file $usage_file (via less if available)
 usage_full() {
     if [ ! -f "$usage_file" ]; then
         echo "ERROR: usage file not found: $usage_file"
@@ -145,12 +172,13 @@ usage_full() {
     echo "Current date: $(date)"
 }
 
-# Argument Parsing
+# Show usage and exit if no arguments were provided
 if [ $# -eq 0 ]; then
     usage
     exit 1
 fi
 
+# Argument Parsing
 while [ $# -gt 0 ]; do
     case "$1" in
         -a|--at)
@@ -185,18 +213,17 @@ while [ $# -gt 0 ]; do
             ;;
         -C|--smart-cfun)
             smart_cfun=1
-            shift
-            continue
             ;;
         -h|-help|--help|help)
             usage
             exit 0
             ;;
-        -help-full|--help-full|help-full)
+        -help-full|--help-full|help-full|full)
             usage_full
             exit 0
             ;;
         *)
+            # Accept the first positional argument as the AT command (without requiring -a flag)
             if [ -z "$atcommand" ]; then
                 atcommand="$1"
             else
@@ -229,68 +256,61 @@ fi
 # Logging
 log() {
     msg="$1"
-    [ "$nologger" -eq 0 ] && logger -t "$logheader" "$msg"
+    [ "$nologger" -eq 0 ] && logger -t "$logheader" -- "$msg"
     echo "$msg"
 }
 
-# Logging multiline AT output commands
-log_multiline() {
-    tmpfile="$1"
-    # Process each line of the file
-    tail -n +2 "$tmpfile" | grep -E '[^[:space:]]' | while IFS= read -r line; do
-        # Print each line to the terminal (always)
-        echo "$line"
-        # Log to syslog if nologger is 0
-        if [ "$nologger" -eq 0 ]; then
-            logger -t "$logheader" "$line"
-        fi
-    done
-}
-
-# Send AT command using picocom
+# Send an AT command via picocom and log the response
+# $1: AT command string
+# $2: picocom exit-after timeout in ms (default: $delaytime)
+# $3: optional external output file if provided, the file is not deleted after use
 send_at() {
     at="$1"
     delay="${2:-$delaytime}"
 
-    # Use $3 if provided. Otherwise, create a temporary file.
-    is_external_file=0
+    # Use the external file if provided; otherwise create a private temp file.
+    # atcmd_sendfile is kept as a global so cleanup() can remove it if a signal
+    # arrives between mktemp and the rm at the end of this function.
+    atcmd_sendfile_external=0
     if [ -n "$3" ]; then
-        tmpfile="$3"
-        is_external_file=1
+        atcmd_sendfile="$3"
+        atcmd_sendfile_external=1
     else
-        tmpfile=$(mktemp)
+        atcmd_sendfile=$(mktemp)
     fi
 
     # Prepare AT command string with CR/LF
     atstring=$(printf "%s\r\n" "$at")
 
     # Send AT command via picocom
-    picocom "$ttyport" --exit-after "$delay" --quiet -t "$atstring" --logfile "$tmpfile" >/dev/null 2>&1
+    picocom "$ttyport" --exit-after "$delay" --quiet -t "$atstring" --logfile "$atcmd_sendfile" >/dev/null 2>&1
 
     # Determine command result
-    if grep -q "OK" "$tmpfile"; then
+    if grep -q "OK" "$atcmd_sendfile"; then
         result="OK"
     else
         result="FAILED"
     fi
 
-    # Log compact syslog entry if logging is enabled
-    if [ "$nologger" -eq 0 ]; then
-        logger -t "$logheader" "at_command=\"$at\" result=$result"
-    fi
+    # Log a compact summary line
+    [ "$nologger" -eq 0 ] && logger -t "$logheader" "at_command=\"$at\" result=$result"
 
-    # Handle multiline output and log/show it
-    log_multiline "$tmpfile"
+    # Print full AT response to terminal and syslog (skip first picocom header line)
+    tail -n +2 "$atcmd_sendfile" | grep -E '[^[:space:]]' | while IFS= read -r line; do
+        echo "$line"
+        [ "$nologger" -eq 0 ] && logger -t "$logheader" "$line"
+    done
 
-    # Display or save full command output
+    # Append full output to save file if requested
     if [ -n "$savefile" ]; then
         date >> "$savefile"
-        cat "$tmpfile" >> "$savefile"
+        cat "$atcmd_sendfile" >> "$savefile"
     fi
 
     # Only delete the file if it was NOT provided as an argument ($3)
-    if [ "$is_external_file" -eq 0 ]; then
-        rm -f "$tmpfile"
+    if [ "$atcmd_sendfile_external" -eq 0 ]; then
+        rm -f "$atcmd_sendfile"
+        atcmd_sendfile=""   # Reset global: file already removed, cleanup() has nothing to do
     fi
 
     # Return 0 if OK, 1 if failed
@@ -347,6 +367,16 @@ unblock_watchdog() {
     log "Watchdog unblocked"
 }
 
+# Send AT+CEER and log the response for diagnostic purposes
+# Called on specific failure points to capture modem error cause:
+# - Modem failed to register on LTE network (AT+CEREG? polling exhausted)
+# - No IP address assigned to PDP context (AT+CGPADDR=1 returned empty)
+# - CRITICAL failure after fallback (before exit 12)
+check_ceer_log() {
+    log "Send: AT+CEER (modem error diagnostic)..."
+    send_at 'AT+CEER' || true
+}
+
 # Restart modem
 restart_modem() {
     log "Restarting modem..."
@@ -355,16 +385,19 @@ restart_modem() {
     sleep 3
     log "Send: \"AT+CFUN=1\" (Radio ON)..."
     send_at "AT+CFUN=1" || true
+    sleep 3
     wait_for_modem || return 1
     wait_for_modem_response || return 1
 }
 
 # Restart wan
-cycle_wan() {
-    iface="wan"
-    log "Cycling WAN interface $iface..."
+restart_wan() {
+    iface="$wan_iface"
+    log "Restarting WAN interface $iface..."
+    log "Send: \"ubus call network.interface.$iface down\"..."
     ubus call network.interface.$iface down >/dev/null 2>&1
     sleep 3
+    log "Send: \"ubus call network.interface.$iface up\"..."
     ubus call network.interface.$iface up >/dev/null 2>&1
     log "Waiting ($wait_after_ifup)sec..."
     sleep "$wait_after_ifup"
@@ -372,47 +405,58 @@ cycle_wan() {
 
 # Check LTE connectivity
 check_lte_connection() {
-    interface="wwan0"
+    interface="$wan_device"
+    diag_mode="${1:-}"  # "qnwlock" enables cell lock diagnostics
 
-    log "Checking Network Registration status (AT+CREG?)..."
+    log "Checking Network Registration status (AT+CEREG?)..."
+    creg_ok=0
+    atcmd_cereg_file=$(mktemp)
     for i in $(seq 1 15); do
-        if picocom "$ttyport" --exit-after 500 --quiet -t "$(printf "AT+CEREG?\r\n")" 2>&1 | grep -qE "\+CEREG: [0-9],(1|5)"; then
+        send_at "AT+CEREG?" "$delaytime" "$atcmd_cereg_file"
+        if grep -qE "\+CEREG: [0-9],(1|5)" "$atcmd_cereg_file"; then
             log "Modem registered on LTE network."
+            creg_ok=1
             break
         fi
         log "Waiting for network registration... ($i/15)"
         sleep 3
     done
-    if [ $i -eq 15 ]; then
+    rm -f "$atcmd_cereg_file"
+    atcmd_cereg_file=""
+    if [ "$creg_ok" -eq 0 ]; then
         log "Error: Modem did not register on LTE network. Aborting connectivity check."
+        check_ceer_log
         return 1
     fi
 
     log "Waiting for interface $interface..."
+    iface_ok=0
     for i in $(seq 1 20); do
         if ip link show "$interface" >/dev/null 2>&1; then
             log "Interface $interface is ready."
+            iface_ok=1
             break
         fi
         log "Waiting for Interface $interface ($i/20)..."
         sleep 1
     done
-    if ! ip link show "$interface" >/dev/null 2>&1; then
+    if [ "$iface_ok" -eq 0 ]; then
         log "Error: interface $interface not available after waiting."
         return 1
     fi
 
     log "Checking PDP IP address..."
-    tmpfile2=$(mktemp)
-    picocom "$ttyport" --exit-after 500 --quiet -t "$(printf "AT+CGPADDR=1\r\n")" --logfile "$tmpfile2" >/dev/null 2>&1
-    pdp_ip=$(grep -oE '\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\b' "$tmpfile2")
+    atcmd_cgpaddr_file=$(mktemp)
+    send_at "AT+CGPADDR=1" "$delaytime" "$atcmd_cgpaddr_file"
+    pdp_ip=$(grep -oE '\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\b' "$atcmd_cgpaddr_file")
+    rm -f "$atcmd_cgpaddr_file"
+    atcmd_cgpaddr_file=""
     if [ -z "$pdp_ip" ]; then
         log "No IP address assigned to PDP context."
-        rm -f "$tmpfile2"
+        check_ceer_log
         return 1
     else
         log "PDP IP address detected: $pdp_ip"
-        rm -f "$tmpfile2"
     fi
 
     log "Checking IPv4 on interface..."
@@ -429,39 +473,106 @@ check_lte_connection() {
         log "Warning: PDP IP address ($pdp_ip) does not match IPv4 address on interface $interface ($ip_address)."
     fi
 
+    # --- Cell lock diagnostics (only when called from QNWLOCK procedure) ---
+    # AT+QNWLOCK="common/4g" : read the list of locked cells configured in the modem
+    # AT+QENG="servingcell"  : read the cell the modem is currently attached to
+    # Logging both allows comparing the lock list vs the actual serving cell,
+    # which is especially useful in multi-cell lock scenarios.
+    if [ "$diag_mode" = "qnwlock" ]; then
+        log "Cell lock diagnostics:"
+        log "Send: AT+QNWLOCK=\"common/4g\" (read configured cell lock list)..."
+        send_at 'AT+QNWLOCK="common/4g"' || true
+        log "Send: AT+QENG=\"servingcell\" (read currently attached cell)..."
+        send_at 'AT+QENG="servingcell"' || true
+    fi
+
+    # Ping test
     log "Starting Ping test on interface $interface..."
+    success=0
+
     for server in $ping_servers; do
-        if ping -c 2 -W 3 -I "$interface" "$server" >/dev/null 2>&1; then
-            log "Ping to $server successful."
-        else
-            log "Ping to $server failed."
-            return 1
+        ping_output=$(ping -c "$ping_count" -W 3 -i "$ping_interval" -I "$interface" "$server" 2>&1)
+        ping_rc=$?
+        # Log each line of ping output
+        echo "$ping_output" | while IFS= read -r line; do
+            log "$line"
+        done
+        if [ $ping_rc -eq 0 ]; then
+            success=1
         fi
     done
 
-    log "LTE connectivity test passed successfully."
-    return 0
+    if [ $success -eq 1 ]; then
+        log "At least one ping succeeded, LTE connectivity OK."
+        return 0
+    else
+        log "All ping attempts failed, LTE connectivity failed."
+        return 1
+    fi
 }
 
-# Smart QNWLOCK
+# smart_restart_procedure <type> [at_command]
+# Runs: optional $2 AT command -> restart_modem -> restart_wan -> check_lte_connection -> fallback if needed.
+# type="SMART CFUN"  : triggered by -C, no cell lock involved, standard connectivity check.
+# type="QNWLOCK"     : triggered by -S, cell lock apply/remove, connectivity check includes
+#                      AT+QNWLOCK="common/4g" and AT+QENG="servingcell" diagnostics.
+# Returns 0 on success, exits 12 on critical failure after fallback.
 smart_restart_procedure() {
-    # arg1: type, arg2: optional AT command
     type="$1"
     lock_watchdog=1
     block_watchdog
 
-    [ -n "$2" ] && send_at "$2" || true
-    restart_modem
-    cycle_wan
+    # Send the initial AT command if provided (e.g. AT+CFUN=1,1 or AT+QNWLOCK=...)
+    if [ -n "$2" ]; then
+        log "Send: \"$2\"..."
+        send_at "$2" || true
+    fi
 
-    if check_lte_connection; then
+    restart_modem
+    restart_wan
+
+    # Pass "qnwlock" flag only for QNWLOCK procedure so that
+    # check_lte_connection will also log:
+    #   AT+QNWLOCK="common/4g"  (configured cell lock list)
+    #   AT+QENG="servingcell"   (currently attached cell)
+    if [ "$type" = "QNWLOCK" ]; then
+        check_lte_connection "qnwlock"
+    else
+        check_lte_connection
+    fi
+
+    if [ $? -eq 0 ]; then
         log "$type completed successfully"
     else
         log "$type failed, attempting fallback..."
-        [ "$type" = "QNWLOCK" ] && send_at 'AT+QNWLOCK="common/4g",0'
+
+        if [ "$type" = "QNWLOCK" ]; then
+            # Remove all cell locks to let the modem connect freely
+            log "Send: \"AT+QNWLOCK=\"common/4g\",0\" (removing cell-lock)..."
+            send_at 'AT+QNWLOCK="common/4g",0'
+        fi
+
         restart_modem
-        cycle_wan
-        check_lte_connection || { log "CRITICAL: $type failed after fallback"; unblock_watchdog; exit 12; }
+        restart_wan
+
+        # Connectivity check after fallback - still log cell diagnostics for QNWLOCK
+        # so we can see which cell the modem attached to after removing the lock
+        if [ "$type" = "QNWLOCK" ]; then
+            check_lte_connection "qnwlock" || {
+                log "CRITICAL: $type failed after fallback"
+                check_ceer_log
+                unblock_watchdog
+                exit 12
+            }
+        else
+            check_lte_connection || {
+                log "CRITICAL: $type failed after fallback"
+                check_ceer_log
+                unblock_watchdog
+                exit 12
+            }
+        fi
+
         log "$type fallback succeeded"
     fi
 
@@ -492,7 +603,7 @@ if [ -n "$savefile" ]; then
     fi
 fi
 
-# Smart CFUN
+# Smart CFUN procedure
 if [ "$smart_cfun" -eq 1 ]; then
     if [ -n "$atcommand" ]; then
         echo "Error: \"-C\" \"--smart-cfun\" does not accept AT commands"
@@ -504,7 +615,7 @@ if [ "$smart_cfun" -eq 1 ]; then
     exit 0
 fi
 
-# Smart QNWLOCK
+# Smart QNWLOCK procedure
 if [ "$smart_qnwlock" -eq 1 ]; then
     case "$atcommand" in
         AT+QNWLOCK=\"common/4g\",[1-9]*)
@@ -514,10 +625,11 @@ if [ "$smart_qnwlock" -eq 1 ]; then
             ;;
         AT+QNWLOCK=\"common/4g\",0)
             # Check if there are actually any active cell-locks
-            tmpfile1=$(mktemp)
-            send_at 'AT+QNWLOCK="common/4g"' "$delaytime" "$tmpfile1"
-            celllock_status=$(grep -oE '\+QNWLOCK: "common/4g",[0-9]+' "$tmpfile1" | cut -d',' -f2)
-            rm -f "$tmpfile1"
+            atcmd_qnwlock_file=$(mktemp)
+            send_at 'AT+QNWLOCK="common/4g"' "$delaytime" "$atcmd_qnwlock_file"
+            celllock_status=$(grep -oE '\+QNWLOCK: "common/4g",[0-9]+' "$atcmd_qnwlock_file" | cut -d',' -f2)
+            rm -f "$atcmd_qnwlock_file"
+            atcmd_qnwlock_file=""
 
             if echo "$celllock_status" | grep -qv '^0$'; then
                 # Cell Lock active, executing smart procedure
@@ -543,4 +655,5 @@ fi
 
 # standard at execution
 send_at "$atcommand"
-exit $?
+rc=$?
+exit $rc
