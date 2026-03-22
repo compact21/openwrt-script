@@ -103,8 +103,8 @@ atcmd 'AT+QCFG="usbnet"';                             # Show USB network type (0
 atcmd 'AT+QCFG="usbcfg",0x2C7C,0x0512,1,1,1,1,1,1,0'; # Enable ADB interface
 
 # Modem Control
-atcmd 'AT+QPOWD=1';      # Power off the LTE modem
-atcmd 'AT+CFUN=1,1';     # Soft reboot modem and enable radio (full restart) whitout check
+atcmd 'AT+QPOWD=1';      # Power off the LTE modem - WARNING: modem will NOT restart automatically, may cause permanent loss of remote connectivity if no watchdog is in place
+atcmd 'AT+CFUN=1,1';     # Soft reboot modem and enable radio (full restart) without check - WARNING: may cause permanent loss of remote connectivity if no watchdog is in place
 atcmd 'AT+QTEMP';        # Show modem temperature
 
 ---------------------------------------------------------------------------------------
