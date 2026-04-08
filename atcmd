@@ -108,6 +108,17 @@ if [ ! -e "$ttyport" ]; then
     exit 2
 fi
 
+# Check if ttyport is already in use by another process
+ttyport_real=$(readlink -f "$ttyport")
+for pid in /proc/[0-9]*/fd/*; do
+    if [ "$(readlink -f "$pid" 2>/dev/null)" = "$ttyport_real" ]; then
+        busy_pid=$(echo "$pid" | cut -d'/' -f3)
+        busy_cmd=$(cat /proc/$busy_pid/comm 2>/dev/null || echo "unknown")
+        echo "Error: AT port $ttyport is already in use by process $busy_pid ($busy_cmd)."
+        exit 6
+    fi
+done
+
 # Check if $atcmd_dir directory exists, if not, create it
 mkdir -p "$atcmd_dir" || { echo "Error: Unable to create $atcmd_dir directory."; exit 8; }
 
