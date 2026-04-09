@@ -34,6 +34,7 @@ ping_interval=2                        # Interval in seconds between ping packet
 # INTERNAL VARIABLES NOT EDIT
 # These variables are managed by the script at runtime.
 # Changing them here will break the script flow or produce undefined behaviour.
+: "${PAGER:=auto}" # Pager for full help: auto, less, cat
 wan_device="" # L2 device resolved at startup from wan_iface via ubus
 smart_qnwlock=0 # Set by -S flag; triggers smart QNWLOCK procedure
 smart_cfun=0 # Set by -C flag; triggers smart CFUN procedure
@@ -46,6 +47,42 @@ atcmd_cgpaddr_file="" # Temp file for AT+CGPADDR=1 output
 pidfile="/tmp/atcmd.pid" # PID file to prevent multiple concurrent instances
 watchdog_block_file="/tmp/watchdog/watchdog.block" # Watchdog block file path
 
+# Print short help reading from external file $usage_file (up to "Examples:" section)
+usage() {
+    if [ ! -f "$usage_file" ]; then
+        echo "ERROR: usage file not found: $usage_file"
+        exit 1
+    fi
+
+    awk '/^Examples:/ {exit} {print}' "$usage_file"
+
+    echo
+    echo "Tip: use --help-full to see full documentation and examples"
+}
+
+# Print full help reading the entire external file $usage_file (via less if available)
+usage_full() {
+    if [ ! -f "$usage_file" ]; then
+        echo "ERROR: usage file not found: $usage_file"
+        exit 1
+    fi
+
+    case "$PAGER" in
+        less)
+            less "$usage_file"
+            ;;
+        cat|more)
+            cat "$usage_file"
+            ;;
+        auto|*)
+            if [ -t 1 ] && command -v less >/dev/null; then
+                less "$usage_file"
+            else
+                cat "$usage_file"
+            fi
+            ;;
+    esac
+}
 
 # Check if the PID file already exists
 if [ -f "$pidfile" ]; then
@@ -63,6 +100,20 @@ if [ -f "$pidfile" ]; then
         rm -f "$pidfile"
     fi
 fi
+
+# Early exit for help flags — skip all hardware/interface checks
+for arg in "$@"; do
+    case "$arg" in
+        -h|-help|--help|help)
+            usage
+            exit 0
+            ;;
+        -help-full|--help-full|help-full|full)
+            usage_full
+            exit 0
+            ;;
+    esac
+done
 
 # Save the current script's PID into the PID file
 echo $$ > "$pidfile"
@@ -151,37 +202,6 @@ if [ -z "$wan_device" ]; then
     echo "Alternatively, edit this script and set the variable wan_iface to match your network configuration."
     exit 5
 fi
-
-# Print short help reading from external file $usage_file (up to "Examples:" section)
-usage() {
-    if [ ! -f "$usage_file" ]; then
-        echo "ERROR: usage file not found: $usage_file"
-        exit 1
-    fi
-
-    awk '/^Examples:/ {exit} {print}' "$usage_file"
-
-    echo
-    echo "Tip: use --help-full to see full documentation and examples"
-    echo "Current date: $(date)"
-}
-
-# Print full help reading the entire external file $usage_file (via less if available)
-usage_full() {
-    if [ ! -f "$usage_file" ]; then
-        echo "ERROR: usage file not found: $usage_file"
-        exit 1
-    fi
-
-    if [ -t 1 ] && command -v less >/dev/null; then
-        less "$usage_file"
-    else
-        cat "$usage_file"
-    fi
-
-    echo
-    echo "Current date: $(date)"
-}
 
 # Show usage and exit if no arguments were provided
 if [ $# -eq 0 ]; then
@@ -306,8 +326,11 @@ send_at() {
     # Log a compact summary line
     [ "$nologger" -eq 0 ] && logger -t "$logheader" "at_command=\"$at\" result=$result"
 
-    # Print full AT response to terminal and syslog (skip first picocom header line)
-    tail -n +2 "$atcmd_sendfile" | grep -E '[^[:space:]]' | while IFS= read -r line; do
+    # Print full AT response to terminal and syslog.
+    # tr '\r' '\n' splits lines joined by \r (picocom writes the echoed command
+    # and the first response line on the same line separated by \r).
+    # grep -v filters out the echoed command itself.
+    tr '\r' '\n' < "$atcmd_sendfile" | grep -v "^${at}$" | grep -E '[^[:space:]]' | while IFS= read -r line; do
         echo "$line"
         [ "$nologger" -eq 0 ] && logger -t "$logheader" "$line"
     done
