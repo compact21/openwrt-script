@@ -44,6 +44,7 @@ atcmd_sendfile="" # Temp file for picocom output in send_at()
 atcmd_qnwlock_file="" # Temp file for AT+QNWLOCK query output
 atcmd_cereg_file="" # Temp file for AT+CEREG? poll output
 atcmd_cgpaddr_file="" # Temp file for AT+CGPADDR=1 output
+atcmd_cpin_file="" # wait_for_modem_response(): AT+CPIN? output
 pidfile="/tmp/atcmd.pid" # PID file to prevent multiple concurrent instances
 watchdog_block_file="/tmp/watchdog/watchdog.block" # Watchdog block file path
 
@@ -101,7 +102,7 @@ if [ -f "$pidfile" ]; then
     fi
 fi
 
-# Early exit for help flags — skip all hardware/interface checks
+# Early exit for help flags skip all hardware/interface checks
 for arg in "$@"; do
     case "$arg" in
         -h|-help|--help|help)
@@ -128,7 +129,8 @@ cleanup() {
     [ -n "$atcmd_qnwlock_file" ] && [ -f "$atcmd_qnwlock_file" ] && rm -f "$atcmd_qnwlock_file"
     [ -n "$atcmd_cereg_file" ] && [ -f "$atcmd_cereg_file" ] && rm -f "$atcmd_cereg_file"
     [ -n "$atcmd_cgpaddr_file" ] && [ -f "$atcmd_cgpaddr_file" ] && rm -f "$atcmd_cgpaddr_file"
-
+    [ -n "$atcmd_cpin_file" ] && [ -f "$atcmd_cpin_file" ] && rm -f "$atcmd_cpin_file"
+ 
     # Remove watchdog block file
     [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file"
 }
@@ -373,7 +375,21 @@ wait_for_modem_response() {
     retries=0
     while [ $retries -lt $max_retries ]; do
         if send_at "AT"; then
-            return 0
+            # Modem is responding check SIM PIN status
+            log "Checking SIM status (AT+CPIN?)..."
+            atcmd_cpin_file=$(mktemp)
+            send_at "AT+CPIN?" "$delaytime" "$atcmd_cpin_file"
+            cpin_status=$(grep -o '+CPIN: [A-Z ]*' "$atcmd_cpin_file" | cut -d' ' -f2-)
+            rm -f "$atcmd_cpin_file"
+            atcmd_cpin_file=""
+            if [ "$cpin_status" = "READY" ]; then
+                log "SIM status: READY"
+                return 0
+            else
+                log "ERROR: SIM PIN required (status: $cpin_status)."
+                log "WARNING: Disable the SIM PIN before using this script."
+                return 1
+            fi
         fi
         retries=$((retries + 1))
         log "Attempt $retries of $max_retries... Modem not responding yet."
