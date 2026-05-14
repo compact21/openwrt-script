@@ -57,7 +57,7 @@ atcmd 'AT';           # Basic communication test (equivalent to: atcmd -a 'AT')
 atcmd 'ATI';          # Show device information (equivalent to: atcmd -a 'ATI')
 atcmd 'AT+CVERSION';  # Show firmware version
 atcmd 'AT+QGMR?';     # Show extended firmware version
-atcmd 'ATI1';         # Enable the "echo" mode or use 'ATI0' to disable it
+atcmd 'ATE1';         # Enable the "echo" mode or use 'ATE0' to disable it
 atcmd 'AT&W';         # Save all current settings to non-volatile memory (retains them after reboot)
 
 # PDP Context Management
@@ -67,15 +67,20 @@ atcmd 'AT+CGACT=0,1';     # Deactivate PDP context 1
 atcmd 'AT+CGATT?';        # Check if modem is attached to network
 
 # SIM Status
-atcmd 'AT+CPIN?';      # Check SIM status (READY, PIN required, etc.)
-atcmd 'AT+CCID';       # Show SIM CCID (only works if SIM is inserted)
+atcmd 'AT+CPIN?';                # Check SIM status (READY, PIN required, etc.)
+atcmd 'AT+CCID';                 # Show SIM CCID (only works if SIM is inserted)
+atcmd 'AT+CLCK="SC",0,"1234"'    # Disable SIM PIN (replace 1234 with actual PIN)
+atcmd 'AT+CLCK="SC",1,"1234"'    # Enable SIM PIN
+atcmd 'AT+CPWD="SC","OLD","NEW"' # Change SIM PIN
 
 # Network Information
 atcmd 'AT+CGPADDR=1';     # Show current IP address
 atcmd 'AT+CSQ';           # Show signal quality [ atcmd -d 500 -a 'AT+CSQ'; # Delay 500ms ]
 atcmd 'AT+QRSRP';         # Show RSRP signal level
+atcmd 'AT+QSINR';         # Show SINR value (format: <pcc>,<scc1>,<scc2>,<scc3>)
 atcmd 'AT+CEREG?';        # Check LTE network registration
 atcmd 'AT+COPS?';         # Query current registered operator and access technology (7=LTE, 2=UMTS, 0=GSM)
+atcmd 'AT+QNWINFO';       # Show current network info (mode, operator, band, channel)
 
 # Primary Cell Info
 atcmd 'AT+QENG="servingcell"';      # Show serving cell info
@@ -111,8 +116,8 @@ atcmd 'AT+QTEMP';        # Show modem temperature
 
 # Standard AT+QNWLOCK commands
 atcmd 'AT+QNWLOCK="common/4g"';            # Show current cell lock status
-atcmd 'AT+QNWLOCK="common/4g",0';          # Disable cell lock whitout check or fallback
-atcmd 'AT+QNWLOCK="common/4g",1,1650,100'; # Single cell lock whitout check or fallback
+atcmd 'AT+QNWLOCK="common/4g",0';          # Disable cell lock without check or fallback
+atcmd 'AT+QNWLOCK="common/4g",1,1650,100'; # Single cell lock without check or fallback
 
 ---------------------------------------------------------------------------------------
 
