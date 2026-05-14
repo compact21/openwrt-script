@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Default pattern separati da spazi
-DEFAULT_PATTERN="atcmd bootrclocal clean-core clearlog connection_reset crash hotplug-button listpackages sqm myvnstat wan_connect wan2_connect watchdog_mbim wifi"
+DEFAULT_PATTERN="atcmd bootrclocal cell_monitor clean-core clearlog connection_reset crash hotplug-button listpackages my-wifi my-vnstat watchdog_mbim SIGTERM unexpected"
 
 show_help() {
     echo "Uso: $0 [PATTERN] [LINES]"
