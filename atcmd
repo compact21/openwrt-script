@@ -180,7 +180,7 @@ mkdir -p "/tmp/watchdog/" || { echo "Error: Unable to create \"/tmp/watchdog/\" 
 
 # Check compatibility with ModemManager
 lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network || true)
-if [ "$lteproto" -eq 1 ]; then
+if [ "$lteproto" -ne 0 ]; then
     echo "Error: Script not compatible with \"ModemManager\""
     exit 3
 fi
@@ -316,7 +316,7 @@ send_at() {
     atstring=$(printf "%s\r\n" "$at")
 
     # Send AT command via picocom
-    picocom "$ttyport" --exit-after "$delay" --quiet -t "$atstring" --logfile "$atcmd_sendfile" >/dev/null 2>&1
+    picocom "$ttyport" --nolock --exit-after "$delay" --quiet -t "$atstring" --logfile "$atcmd_sendfile" >/dev/null 2>&1
 
     # Determine command result
     if grep -q "OK" "$atcmd_sendfile"; then
