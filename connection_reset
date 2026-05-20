@@ -5,12 +5,13 @@
 
 logheader="connection_reset"
 atcmd_bin="/root/bin/atcmd"
+usb_device_id="2c7c:0512"          # USB VID:PID of the LTE modem (Quectel EG18-EA)
 
 # Prevent concurrent execution
 script_lock_file="/tmp/connection_reset.lock"
 if [ -f "$script_lock_file" ]; then
         echo "Another instance is running. Exiting."
-        logger -t "$logheader" "Script already running"
+        logger -t "$logheader" "Script already running, exiting"
         exit 1
 fi
 
@@ -47,28 +48,41 @@ do_cgatt_detach() {
                 logger -t "$logheader" "User cancelled: AT+CGATT=0"
                 return 0
         fi
+        
         logger -t "$logheader" "Executing: AT+CGATT=0"
-        "$atcmd_bin" 'AT+CGATT=0'
-        logger -t "$logheader" "AT+CGATT=0 sent"
+        if "$atcmd_bin" 'AT+CGATT=0'; then
+                logger -t "$logheader" "AT+CGATT=0 sent successfully"
+        else
+                rc=$?
+                logger -t "$logheader" "AT+CGATT=0 FAILED (atcmd exit code: $rc)"
+                echo "Error: AT+CGATT=0 failed (exit code: $rc)."
+                return 1
+        fi
 }
 
 # Option 2: USB reset
-# Resets the USB device — useful when the modem is unresponsive at the USB level.
+# Resets the USB device useful when the modem is unresponsive at the USB level.
 do_usb_reset() {
-        echo "--- USB reset (usbreset 2c7c:0512) ---"
+        echo "--- USB reset (usbreset $usb_device_id) ---"
         if ! command -v usbreset >/dev/null 2>&1; then
                 echo "Error: usbreset not installed."
                 logger -t "$logheader" "usbreset not found"
                 return 1
         fi
-        if ! confirm "Execute usbreset 2c7c:0512?"; then
+        if ! confirm "Execute usbreset $usb_device_id?"; then
                 echo "Cancelled."
                 logger -t "$logheader" "User cancelled: usbreset"
                 return 0
         fi
-        logger -t "$logheader" "Executing: usbreset 2c7c:0512"
-        usbreset 2c7c:0512
-        logger -t "$logheader" "usbreset completed"
+        logger -t "$logheader" "Executing: usbreset $usb_device_id"
+        if usbreset "$usb_device_id"; then
+                logger -t "$logheader" "usbreset completed successfully"
+        else
+                rc=$?
+                logger -t "$logheader" "usbreset FAILED (exit code: $rc)"
+                echo "Error: usbreset failed (exit code: $rc)."
+                return 1
+        fi
 }
 
 # Option 3: Full modem reset via SMART CFUN
@@ -84,8 +98,14 @@ do_cfun_reset() {
                 return 0
         fi
         logger -t "$logheader" "Executing: atcmd -C (SMART CFUN)"
-        "$atcmd_bin" -C
-        logger -t "$logheader" "SMART CFUN completed"
+        if "$atcmd_bin" -C; then
+                logger -t "$logheader" "SMART CFUN completed successfully"
+        else
+                rc=$?
+                logger -t "$logheader" "SMART CFUN FAILED (atcmd exit code: $rc)"
+                echo "Error: SMART CFUN failed (exit code: $rc)."
+                return 1
+        fi
 }
 
 # ------------------ MENU ---------------------------------------------
@@ -95,17 +115,18 @@ echo "=== Connection Reset Utility ==="
 echo
 echo "Select operation:"
 echo "  1) Detach LTE connection (AT+CGATT=0)"
-echo "  2) Reset USB device (usbreset 2c7c:0512)"
+echo "  2) Reset USB device (usbreset $usb_device_id)"
 echo "  3) Reset LTE module (SMART CFUN - AT+CFUN=1,1)"
 echo
 read -r choice
-
+exit_code=0
 choice_label=""
 case "$choice" in
-    1) choice_label="AT+CGATT=0 detach";  do_cgatt_detach ;;
-    2) choice_label="USB reset";          do_usb_reset    ;;
-    3) choice_label="SMART CFUN reset";   do_cfun_reset   ;;
-    *) echo "Invalid option.";            exit 0          ;;
+    1) choice_label="AT+CGATT=0 detach";  do_cgatt_detach || exit_code=$? ;;
+    2) choice_label="USB reset";          do_usb_reset    || exit_code=$? ;;
+    3) choice_label="SMART CFUN reset";   do_cfun_reset   || exit_code=$? ;;
+    *) echo "Invalid option.";            exit 0 ;;
 esac
+logger -t "$logheader" "Done (choice=$choice: $choice_label, exit_code=$exit_code)"
+exit $exit_code
 
-logger -t "$logheader" "Done (choice=$choice: $choice_label)"
