@@ -1,0 +1,651 @@
+#!/bin/sh
+# cell_status - show LTE serving cell status, cell lock and carrier aggregation
+
+ping_server="9.9.9.9"
+max_wait=120 # seconds
+
+# BTS lookup CSV -- used to resolve PCC EARFCN+PCI to location name
+# If file is absent, output is unchanged (no warning printed)
+BTS_CSV="/tmp/mnt/bin/bts.csv"
+
+# Check ModemManager
+lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
+[ "$lteproto" -ne 0 ] && { echo "Script not compatible with ModemManager"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+usage() {
+cat <<EOF
+Usage: $(basename "$0") [options]
+ 
+Options:
+  -h           Show this help
+  -v           Verbose/debug mode (can be combined with any flag)
+  -l           Show cell lock status (AT+QNWLOCK)
+  -i           Show serving cell info (AT+QENG) and signal quality
+  -b           Show carrier aggregation (AT+QCAINFO)
+               Note: -b implies running AT+QENG first (PCC data required for CA table)
+  -p server    Ping server to generate traffic (default: 9.9.9.9)
+  -d URL       Download from URL instead of ping (recommended >10 MB for reliable CA detection)
+ 
+Modes:
+  No flags     : Run full output (lock + cell + CA) same as -l -i -b
+  -l           : Cell lock status only (no traffic needed)
+  -i           : Serving cell info and signal quality only
+  -b           : Serving cell + carrier aggregation
+  -l -i -b     : Same as no flags (full output)
+  -v           : Enable verbose/debug output for whatever flags are active
+ 
+Description:
+  Queries the modem for current LTE cell-lock status (AT+QNWLOCK),
+  serving cell status (AT+QENG) and active carrier aggregation (AT+QCAINFO).
+  Automatically starts network traffic to trigger CA before querying.
+ 
+Examples:
+  $(basename "$0")              # full output (lock + cell + CA)
+  $(basename "$0") -l           # cell lock status only
+  $(basename "$0") -i           # serving cell info and signal quality only
+  $(basename "$0") -b           # serving cell + carrier aggregation
+  $(basename "$0") -l -i -b     # full output (same as no flags)
+  $(basename "$0") -v           # full output with debug info
+  $(basename "$0") -v -i        # serving cell only, verbose
+  $(basename "$0") -v -b        # CA only, verbose
+
+  $(basename "$0") -d http://speedtest.tele2.net/10MB.zip
+  $(basename "$0") -v -d http://speedtest.tele2.net/10MB.zip
+  $(basename "$0") -p www.google.it
+  $(basename "$0") -v -p 1.1.1.1
+
+EOF
+exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Variables
+# ---------------------------------------------------------------------------
+verbose=0
+traffic_mode="ping"
+traffic_pid=""
+tmp_qeng=""
+tmp_qca=""
+tmp_lock=""
+temp_download=""
+at_timeout="300"
+qeng_attempt=0
+qca_attempt=0
+qeng_time=0
+qca_time=0
+
+# Mode flags default (no flags) = full output
+show_lock=0   # -l : AT+QNWLOCK cell lock status
+show_cell=0   # -i : AT+QENG + signal quality
+show_ca=0     # -b : AT+QCAINFO carrier aggregation
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+cleanup() {
+    [ -n "$traffic_pid" ]    && kill "$traffic_pid" 2>/dev/null || true
+    [ -n "$tmp_qeng" ]       && rm -f "$tmp_qeng"
+    [ -n "$tmp_qca" ]        && rm -f "$tmp_qca"
+    [ -n "$tmp_lock" ]       && rm -f "$tmp_lock"
+    [ -n "$temp_download" ]  && rm -f "$temp_download"
+}
+
+trap 'echo; echo "Interrupted. Cleaning up..."; cleanup; exit 1' INT TERM
+trap 'cleanup' EXIT
+
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+while getopts "hvlibp:d:" opt; do
+    case "$opt" in
+        h) usage ;;
+        v) verbose=1 ;;
+        l) show_lock=1 ;;
+        i) show_cell=1 ;;
+        b) show_ca=1 ;;
+        p) ping_server="$OPTARG" ;;
+        d) traffic_mode="download"; download_url="$OPTARG" ;;
+        *) usage ;;
+    esac
+done
+
+# -v alone (no mode flags) also triggers full output
+# If none of -l -i -b is set: run full output
+if [ "$show_lock" -eq 0 ] && [ "$show_cell" -eq 0 ] && [ "$show_ca" -eq 0 ]; then
+    show_lock=1
+    show_cell=1
+    show_ca=1
+fi
+
+# -b always needs AT+QENG (PCC data required for CA table)
+# so show_qeng controls whether we actually run the AT+QENG query
+show_qeng=0
+[ "$show_cell" -eq 1 ] && show_qeng=1
+[ "$show_ca"   -eq 1 ] && show_qeng=1
+
+# ---------------------------------------------------------------------------
+# Cell lock query (AT+QNWLOCK="common/4g")
+#
+# Response format:
+# +QNWLOCK: "common/4g",<n>[,<earfcn>,<pcid>,...]
+#
+# Fields:
+#   n=0  : no cell lock active
+#   n>0  : n locked cells follow as earfcn,pcid pairs
+# ---------------------------------------------------------------------------
+query_cell_lock() {
+    tmp_lock=$(mktemp)
+    atstring=$(printf '%s\r\n' 'AT+QNWLOCK="common/4g"')
+    picocom "/dev/ttyUSB2" --nolock --exit-after "$at_timeout" --quiet -t "$atstring" --logfile "$tmp_lock" > /dev/null
+
+    if [ "$verbose" -eq 1 ]; then
+        echo ""
+        echo "[AT COMMAND] AT+QNWLOCK=\"common/4g\""
+        echo "[AT RAW RESPONSE]"
+        cat "$tmp_lock"
+        echo ""
+    fi
+
+    lock_line=$(grep '+QNWLOCK:' "$tmp_lock")
+
+    echo ""
+    echo "=== Cell Lock Status (AT+QNWLOCK=\"common/4g\") =========================="
+    if [ -n "$lock_line" ]; then
+        if echo "$lock_line" | grep -qE '"common/4g",0'; then
+            echo "  No cell lock active"
+            [ "$verbose" -eq 1 ] && { echo "  Debug output:"; cat "$tmp_lock"; }
+        else
+            echo "  Cell lock active:"
+            echo "  $lock_line"
+        fi
+    else
+        echo "  No cell lock detected (no modem response)"
+        [ "$verbose" -eq 1 ] && { echo "  Debug output:"; cat "$tmp_lock"; }
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Bandwidth code to MHz
+# AT+QENG dl/ul_bandwidth codes: 0=1.4  1=3  2=5  3=10  4=15  5=20 MHz
+# AT+QCAINFO bandwidth codes:    6=1.4  15=3  25=5  50=10  75=15  100=20 MHz
+# Both sets handled here.
+# ---------------------------------------------------------------------------
+bw_to_mhz() {
+    case $1 in
+        0)   echo 1.4 ;;   # AT+QENG
+        1)   echo 3   ;;   # AT+QENG
+        2)   echo 5   ;;   # AT+QENG
+        3)   echo 10  ;;   # AT+QENG
+        4)   echo 15  ;;   # AT+QENG
+        5)   echo 20  ;;   # AT+QENG
+        6)   echo 1.4 ;;   # AT+QCAINFO
+        15)  echo 3   ;;   # AT+QCAINFO
+        25)  echo 5   ;;   # AT+QCAINFO
+        50)  echo 10  ;;   # AT+QCAINFO
+        75)  echo 15  ;;   # AT+QCAINFO
+        100) echo 20  ;;   # AT+QCAINFO
+        *)   echo 0   ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# EARFCN LTE band (most common bands in Italy)
+# ---------------------------------------------------------------------------
+earfcn_to_band() {
+    earfcn=$1
+    if   [ "$earfcn" -ge 0    ] && [ "$earfcn" -le 599   ]; then echo "B1  (2100 MHz)"
+    elif [ "$earfcn" -ge 600  ] && [ "$earfcn" -le 1199  ]; then echo "B2  (1900 MHz)"
+    elif [ "$earfcn" -ge 1200 ] && [ "$earfcn" -le 1949  ]; then echo "B3  (1800 MHz)"
+    elif [ "$earfcn" -ge 1950 ] && [ "$earfcn" -le 2399  ]; then echo "B4  (1700 MHz)"
+    elif [ "$earfcn" -ge 2400 ] && [ "$earfcn" -le 2649  ]; then echo "B5   (850 MHz)"
+    elif [ "$earfcn" -ge 2750 ] && [ "$earfcn" -le 3449  ]; then echo "B7  (2600 MHz)"
+    elif [ "$earfcn" -ge 3450 ] && [ "$earfcn" -le 3799  ]; then echo "B8   (900 MHz)"
+    elif [ "$earfcn" -ge 6150 ] && [ "$earfcn" -le 6449  ]; then echo "B20  (800 MHz)"
+    elif [ "$earfcn" -ge 6600 ] && [ "$earfcn" -le 7399  ]; then echo "B28  (700 MHz)"
+    else echo "B?  (EARFCN $earfcn)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# MCC+MNC -> operator name (Italian operators)
+# ---------------------------------------------------------------------------
+operator_name() {
+    case "$1" in
+        22201) echo "TIM" ;;
+        22210) echo "Vodafone" ;;
+        22206) echo "Wind Tre" ;;
+        22288) echo "Wind Tre" ;;
+        22250) echo "Iliad" ;;
+        22235) echo "Fastweb" ;;
+        22234) echo "BT Italia" ;;
+        22299) echo "3 Italia" ;;
+        22208) echo "Tiscali" ;;
+        *)     echo "unknown" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Signal quality labels
+# ---------------------------------------------------------------------------
+rsrp_label() {
+    val=$1
+    if   [ "$val" -ge -80  ]; then echo "excellent"
+    elif [ "$val" -ge -95  ]; then echo "good"
+    elif [ "$val" -ge -110 ]; then echo "fair"
+    else echo "poor"
+    fi
+}
+
+rsrq_label() {
+    val=$1
+    if   [ "$val" -ge -10 ]; then echo "excellent"
+    elif [ "$val" -ge -15 ]; then echo "good"
+    elif [ "$val" -ge -20 ]; then echo "fair"
+    else echo "poor"
+    fi
+}
+
+sinr_label() {
+    val=$1
+    if   [ "$val" -ge 20 ]; then echo "excellent"
+    elif [ "$val" -ge 10 ]; then echo "good"
+    elif [ "$val" -ge 0  ]; then echo "fair"
+    else echo "poor"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# BTS lookup -- resolve PCC EARFCN+PCI to location name from CSV
+# Prints location name if found, empty string if not found or CSV absent.
+# Silent if BTS_CSV does not exist -- no warning printed.
+#
+# $1: EARFCN
+# $2: PCI
+# ---------------------------------------------------------------------------
+bts_lookup() {
+    local earfcn="$1"
+    local pci="$2"
+
+    [ -z "$BTS_CSV" ]    && return 0
+    [ ! -f "$BTS_CSV" ]  && return 0
+
+    # CSV format: earfcn,pci,enb_id,location,band
+    # Skip comment lines and header; match on exact earfcn and pci columns
+    awk -F',' -v e="$earfcn" -v p="$pci" '
+        /^\s*#/       { next }
+        /^\s*earfcn/  { next }
+        /^\s*$/       { next }
+        $1==e && $2==p {
+            gsub(/^[ \t]+|[ \t]+$/, "", $4)
+            print $4
+            exit
+        }
+    ' "$BTS_CSV"
+}
+
+# ===========================================================================
+# MAIN
+# ===========================================================================
+
+# start_epoch here so duration includes the lock query time in full/mixed modes
+start_epoch=$(date +%s)
+
+# ---------------------------------------------------------------------------
+# Cell lock - only when -l or full mode
+# ---------------------------------------------------------------------------
+[ "$show_lock" -eq 1 ] && query_cell_lock
+
+# ---------------------------------------------------------------------------
+# Start traffic to trigger CA (only when AT+QENG or AT+QCAINFO will be run)
+# ---------------------------------------------------------------------------
+if [ "$show_qeng" -eq 1 ] || [ "$show_ca" -eq 1 ]; then
+    if [ "$traffic_mode" = "ping" ]; then
+        [ "$verbose" -eq 1 ] && echo "Starting ping to $ping_server..."
+        ping "$ping_server" > /dev/null 2>&1 &
+        traffic_pid=$!
+    else
+        [ -z "$download_url" ] && { echo "Error: missing URL for download"; exit 1; }
+        [ "$verbose" -eq 1 ] && echo "Downloading from $download_url..."
+        temp_download=$(mktemp /tmp/cellstatus_download.XXXXXX)
+        curl -s -o "$temp_download" "$download_url" &
+        traffic_pid=$!
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# AT+QENG="servingcell"  serving cell status
+# Always executed when show_qeng=1 (i.e. -i, -b, or full mode)
+#
+# Response format:
+# +QENG: "servingcell",<state>,"LTE",<is_tdd>,<mcc>,<mnc>,<cellid>,<pcid>,<earfcn>,
+#        <freq_band_ind>,<ul_bandwidth>,<dl_bandwidth>,<tac>,<rsrp>,<rsrq>,<rssi>,<sinr>,<cqi>,<tx_power>,<srxlev>
+#
+# Example output:
+# +QENG: "servingcell","NOCONN","LTE","FDD",222,88,382F300,65,1650,3,5,5,5A24,-102,-11,-72,14,4,-
+#
+# Fields:
+#   state         : NOCONN=idle (no active data session), CONNECT=data session open
+#   is_tdd        : FDD or TDD (duplex type)
+#   mcc           : Mobile Country Code (222 = Italy)
+#   mnc           : Mobile Network Code (88 = Wind Tre, 1 = TIM, 10 = Fastweb/Vodafone)
+#   cellid        : ECI 28-bit hex; first 5 hex chars = eNB ID (20 bit), last 2 = Sector ID (8 bit)
+#   pcid          : Physical Cell ID, uniquely identifies the cell on the same frequency
+#   earfcn        : LTE frequency index determines the band (e.g. 1650 = B3 1800 MHz)
+#   freq_band_ind : LTE band number (e.g. 3 = B3; matches the number here but not always)
+#   ul_bandwidth  : uplink channel width code   (0=1.4  1=3  2=5  3=10  4=15  5=20 MHz)
+#   dl_bandwidth  : downlink channel width code (0=1.4  1=3  2=5  3=10  4=15  5=20 MHz)
+#   tac           : Tracking Area Code (hex)
+#   rsrp          : signal power in dBm         (excellent>-80, good>-95, fair>-110, poor<-110)
+#   rsrq          : signal quality in dB        (excellent>-10, good>-15, fair>-20,  poor<-20)
+#   rssi          : total received power in dBm
+#   sinr          : signal-to-noise ratio       (excellent>20,  good>10,  fair>0,    poor<0)
+#   cqi           : Channel Quality Indication, range 1-30; "-" when not in CONNECT state
+#   tx_power      : max UL channel tx power in 1/10 dBm; meaningful only in CONNECT state
+#   srxlev        : cell ranking for handover   (low values = handover candidate)
+#
+
+# Note: freq_band_ind, state, cqi, tx_power, srxlev are parsed for completeness but not displayed.
+#       cellid_sec (sector ID) is computed but not displayed.
+#       These fields are reserved for future use.
+#
+# References:
+#   https://auroraevernet.ru/upload/iblock/b89/kzqfh0arrcy7nf6qul3pkoaycgewojwd.pdf
+#   https://forums.quectel.com/t/ep06-a-cell-lock/15873/7
+# ---------------------------------------------------------------------------
+if [ "$show_qeng" -eq 1 ]; then
+
+    [ "$verbose" -eq 1 ] && echo "Waiting 1 second before AT+QENG..."
+    sleep 1
+
+    qeng_start=$(date +%s)
+    while true; do
+        qeng_attempt=$((qeng_attempt + 1))
+        tmp_qeng=$(mktemp)
+        atstring=$(printf '%s\r\n' 'AT+QENG="servingcell"')
+        picocom "/dev/ttyUSB2" --nolock --exit-after "$at_timeout" --quiet -t "$atstring" --logfile "$tmp_qeng" > /dev/null
+
+        qeng_line=$(grep '+QENG: "servingcell"' "$tmp_qeng" 2>/dev/null)
+        if [ -n "$qeng_line" ]; then
+            qeng_time=$(( $(date +%s) - qeng_start ))
+            [ "$verbose" -eq 1 ] && echo "[QENG] OK after $qeng_attempt attempt(s) (${qeng_time}s)"
+            break
+        fi
+
+        elapsed=$(( $(date +%s) - start_epoch ))
+        [ "$elapsed" -ge "$max_wait" ] && { echo "Timeout: no LTE cell attached within $max_wait seconds"; exit 1; }
+
+        rm -f "$tmp_qeng"
+        sleep 1
+    done
+
+    if [ "$verbose" -eq 1 ]; then
+        echo ""
+        echo "[AT COMMAND] AT+QENG=\"servingcell\""
+        echo "[AT RAW RESPONSE]"
+        cat "$tmp_qeng"
+        echo ""
+    fi
+
+    # Parse AT+QENG fields
+    state=$(echo "$qeng_line"        | cut -d',' -f2  | tr -d '"')   # reserved for future use
+    is_tdd=$(echo "$qeng_line"       | cut -d',' -f4  | tr -d '"')
+    mcc=$(echo "$qeng_line"          | cut -d',' -f5)
+    mnc=$(echo "$qeng_line"          | cut -d',' -f6)
+    cellid_raw=$(echo "$qeng_line"   | cut -d',' -f7)
+    pcid=$(echo "$qeng_line"         | cut -d',' -f8)
+    earfcn=$(echo "$qeng_line"       | cut -d',' -f9)
+    freq_band=$(echo "$qeng_line"    | cut -d',' -f10)   # reserved for future use
+    ul_bw_code=$(echo "$qeng_line"   | cut -d',' -f11)
+    dl_bw_code=$(echo "$qeng_line"   | cut -d',' -f12)
+    tac=$(echo "$qeng_line"          | cut -d',' -f13)
+    rsrp=$(echo "$qeng_line"         | cut -d',' -f14)
+    rsrq=$(echo "$qeng_line"         | cut -d',' -f15)
+    rssi=$(echo "$qeng_line"         | cut -d',' -f16)
+    sinr=$(echo "$qeng_line"         | cut -d',' -f17)
+    cqi=$(echo "$qeng_line"          | cut -d',' -f18)   # reserved for future use
+    tx_power=$(echo "$qeng_line"     | cut -d',' -f19)   # reserved for future use
+    srxlev=$(echo "$qeng_line"       | cut -d',' -f20)   # reserved for future use
+
+    # Validate Cell ID
+    if [ -z "$cellid_raw" ] || ! echo "$cellid_raw" | grep -qiE '^[0-9A-Fa-f]+$'; then
+        echo "Cell ID not available or invalid: '$cellid_raw'"
+        [ "$verbose" -eq 1 ] && cat "$tmp_qeng"
+        exit 1
+    fi
+
+    # Compute eNB ID and Sector ID from ECI (28-bit hex, zero-padded to 7 chars)
+    # Reference: 3GPP TS 36.413 https://www.rfwireless-world.com/calculators/lte-ecgi-eci-calculator
+    cellid_padded=$(echo "$cellid_raw" | awk '{ printf "%07s", $0 }' | tr ' ' '0')
+    cellid_enb_hex=$(echo "$cellid_padded" | cut -c1-5)
+    cellid_sec_hex=$(echo "$cellid_padded" | cut -c6-7)
+    cellid_enb=$(printf "%d" "0x$cellid_enb_hex")
+    cellid_sec=$(printf "%d" "0x$cellid_sec_hex")   # reserved for future use
+    cellid_dec=$(printf "%d" "0x$cellid_padded")
+    mccmnc="$mcc$mnc"
+
+    ul_mhz=$(bw_to_mhz "$ul_bw_code")
+    dl_mhz=$(bw_to_mhz "$dl_bw_code")
+    band_label=$(earfcn_to_band "$earfcn")
+
+fi  # end show_qeng
+
+# ---------------------------------------------------------------------------
+# AT+QCAINFO  carrier aggregation
+# Only when -b or full mode
+#
+# NOTE: sustained traffic is required for complete and reliable CA output.
+# A short ping may not be enough; prefer a large download or speed-test.
+# Without traffic, only configured SCCs are shown, not necessarily active ones.
+#
+# Response format:
+# +QCAINFO: "PCC",<freq>,<bandwidth>,<band>,<pcell_state>,<pcid>,<rsrp>,<rsrq>,<rssi>,<sinr>
+# +QCAINFO: "SCC",<freq>,<bandwidth>,<band>,<scell_state>,<pcid>,<rsrp>,<rsrq>,<rssi>,<sinr>
+#
+# Example output:
+# +QCAINFO: "pcc",1650,100,"LTE BAND 3",1,65,-102,-12,-66,11
+# +QCAINFO: "scc",100,100,"LTE BAND 1",1,65,-113,-14,-88,0
+# +QCAINFO: "scc",6200,50,"LTE BAND 20",1,80,-98,-15,-73,0
+#
+# Fields:
+#   PCC/SCC      : Primary Cell / Secondary Cell (carrier aggregation)
+#                  Note: Quectel firmware returns "wcc" (Wideband Component Carrier)
+#                  instead of "pcc" when session state is NOCONN. Both map to PCC.
+#   freq         : EARFCN of the carrier
+#   bandwidth    : channel width code (6=1.4  15=3  25=5  50=10  75=15  100=20 MHz)
+#   band         : band string (e.g. "LTE BAND 3")
+#   pcell_state  : PCC state (0=no serving  1=registered)
+#   scell_state  : SCC state (0=deconfigured  1=configured deactivated  2=configured activated)
+#   pcid         : Physical Cell ID
+#   rsrp         : signal power in dBm         (excellent>-80, good>-95, fair>-110, poor<-110)
+#   rsrq         : signal quality in dB        (excellent>-10, good>-15, fair>-20,  poor<-20)
+#   rssi         : total received power in dBm
+#   sinr         : signal-to-noise ratio       (excellent>20,  good>10,  fair>0,    poor<0)
+#                  Note: datasheet declares this field as 1/5th dB (range 0-250 = -20..+30 dB)
+#                  but example values (e.g. 11, 0) are consistent with direct dB as in AT+QENG.
+#                  Script treats as direct dB -- consistent with observed modem output.
+#
+# Notes:
+#   1. Channel bandwidth does not affect cell-lock stability,
+#      only the theoretical throughput capacity.
+#   2. A narrower cell with better RSRP/RSRQ/SINR can outperform
+#      a wider cell with weak or noisy signal.
+# ---------------------------------------------------------------------------
+if [ "$show_ca" -eq 1 ]; then
+
+    [ "$verbose" -eq 1 ] && echo "Waiting 3 seconds before AT+QCAINFO..."
+    sleep 3
+
+    qca_start=$(date +%s)
+    while true; do
+        qca_attempt=$((qca_attempt + 1))
+        tmp_qca=$(mktemp)
+        atstring=$(printf '%s\r\n' 'AT+QCAINFO')
+        picocom "/dev/ttyUSB2" --nolock --exit-after "$at_timeout" --quiet -t "$atstring" --logfile "$tmp_qca" > /dev/null 2>&1
+
+        qca_line=$(grep '+QCAINFO:' "$tmp_qca" 2>/dev/null)
+        if [ -n "$qca_line" ]; then
+            qca_time=$(( $(date +%s) - qca_start ))
+            [ "$verbose" -eq 1 ] && echo "[QCAINFO] OK after $qca_attempt attempts (${qca_time}s)"
+            break
+        fi
+
+        elapsed=$(( $(date +%s) - start_epoch ))
+        [ "$elapsed" -ge "$max_wait" ] && { echo "CA timeout ($max_wait s)"; break; }
+
+        rm -f "$tmp_qca"
+        sleep 1
+    done
+
+    if [ "$verbose" -eq 1 ]; then
+        echo ""
+        echo "[AT COMMAND] AT+QCAINFO"
+        echo "[AT RAW RESPONSE]"
+        cat "$tmp_qca"
+        echo ""
+    fi
+
+fi  # end show_ca
+
+# Stop traffic
+kill "$traffic_pid" 2>/dev/null || true
+traffic_pid=""
+
+end_epoch=$(date +%s)
+duration=$((end_epoch - start_epoch))
+
+# ---------------------------------------------------------------------------
+# Output Serving Cell (AT+QENG)  [-i or full mode]
+# ---------------------------------------------------------------------------
+if [ "$show_cell" -eq 1 ] && [ -n "$qeng_line" ]; then
+
+    noise_floor=$(( rssi - rsrp ))
+
+    if   [ "$noise_floor" -lt 15 ]; then noise_label="low        "
+    elif [ "$noise_floor" -lt 26 ]; then noise_label="moderate   "
+    elif [ "$noise_floor" -lt 36 ]; then noise_label="high       "
+    else                                  noise_label="very high  "
+    fi
+
+    echo ""
+    echo "=== Serving Cell (AT+QENG=\"servingcell\") ================================="
+    echo "  Operator     : $(operator_name "$mccmnc")  ($mcc/$mnc)"
+    echo "  Technology   : LTE $is_tdd"
+    echo "  Band         : $band_label"
+    echo "  EARFCN       : $earfcn"
+    echo "  PCI          : $pcid"
+    echo "  Bandwidth UL : $ul_mhz MHz   DL: $dl_mhz MHz"
+    echo "  Cell ID (ECI): $cellid_dec  (hex: $cellid_raw)"
+    echo "  eNB ID       : $cellid_enb"
+    echo ""
+    echo "=== Signal Quality (PCC) ================================================="
+    printf "  RSRP : %4s dBm   %-10s (excellent>-80  good>-95   fair>-110)\n" "$rsrp" "$(rsrp_label "$rsrp")"
+    printf "  RSRQ : %4s dB    %-10s (excellent>-10  good>-15   fair>-20)\n"  "$rsrq" "$(rsrq_label "$rsrq")"
+    printf "  RSSI : %4s dBm   noise floor: ~%s dB  %-11s (low<15  moderate<26  high<36)\n" "$rssi" "$noise_floor" "$noise_label"
+    printf "  SINR : %4s dB    %-10s (excellent>20   good>10    fair>0)\n"    "$sinr" "$(sinr_label "$sinr")"
+
+fi
+
+# ---------------------------------------------------------------------------
+# Output Carrier Aggregation (AT+QCAINFO)  [-b or full mode]
+# ---------------------------------------------------------------------------
+if [ "$show_ca" -eq 1 ]; then
+
+    if [ -n "$qca_line" ]; then
+        echo ""
+        echo "=== Carrier Aggregation (AT+QCAINFO) ====================================="
+        printf "  %-5s  %-12s  %5s  %6s  %5s  %5s  %5s  %5s  %s\n" \
+            "Type" "Band" "MHz" "EARFCN" "PCI" "RSRP" "RSRQ" "SINR" "Quality"
+        echo "  -----------------------------------------------------------------------"
+
+        total=0
+        scc_count=0
+
+        while IFS= read -r line; do
+            echo "$line" | grep -q '+QCAINFO:' || continue
+
+            ca_type=$(echo "$line"  | tr -d '\r' | awk -F'"' '{print $2}' | tr '[:upper:]' '[:lower:]')
+            ca_freq=$(echo "$line"  | tr -d '\r' | cut -d',' -f2 | tr -d ' ')
+            ca_bw=$(echo "$line"    | tr -d '\r' | cut -d',' -f3 | tr -d ' "')
+            ca_band=$(echo "$line"  | tr -d '\r' | cut -d',' -f4 | tr -d '"' | sed 's/LTE BAND /B/')
+            ca_state=$(echo "$line" | tr -d '\r' | cut -d',' -f5 | tr -d ' ')   # reserved for future use
+            ca_pcid=$(echo "$line"  | tr -d '\r' | cut -d',' -f6 | tr -d ' ')
+            ca_rsrp=$(echo "$line"  | tr -d '\r' | cut -d',' -f7 | tr -d ' ')
+            ca_rsrq=$(echo "$line"  | tr -d '\r' | cut -d',' -f8 | tr -d ' ')
+            ca_sinr=$(echo "$line"  | tr -d '\r' | cut -d',' -f10 | tr -d ' ')
+            ca_mhz=$(bw_to_mhz "$ca_bw")
+
+            [ "$ca_mhz" = "0" ] && continue
+
+            case "$ca_type" in
+                pcc|wcc) label="PCC" ;;
+                scc)     scc_count=$((scc_count+1)); label="SCC$scc_count" ;;
+                *)       label="$ca_type" ;;
+            esac
+
+            printf "  %-5s  %-12s  %5s  %6s  %5s  %5s  %5s  %5s  %s\n" \
+                "$label" "$ca_band" "$ca_mhz" "$ca_freq" "$ca_pcid" \
+                "$ca_rsrp" "$ca_rsrq" "$ca_sinr" \
+                "$(sinr_label "$ca_sinr")"
+
+            total=$(awk "BEGIN {print $total+$ca_mhz}")
+        done < "$tmp_qca"
+
+        echo "  -----------------------------------------------------------------------"
+        echo "  Total aggregated bandwidth: $total MHz"
+    else
+        echo ""
+        echo "=== Carrier Aggregation =================================================="
+        echo "  No CA detected (traffic was active; cell may not support CA on this band)"
+    fi
+
+fi
+
+# ---------------------------------------------------------------------------
+# Reference link and BTS location -- shown only when -i (serving cell) is active
+# ---------------------------------------------------------------------------
+if [ "$show_cell" -eq 1 ] && [ -n "$qeng_line" ]; then
+    echo ""
+    echo "=== Reference Link to BTS from lteitaly =================================="
+    echo "  https://lteitaly.it/it/internal/map.php#bts=$mccmnc.$cellid_enb"
+
+    # Resolve PCC location from CSV lookup (silent if BTS_CSV absent)
+    pcc_location=$(bts_lookup "$earfcn" "$pcid")
+    if [ -n "$pcc_location" ]; then
+        echo "  Location : $pcc_location"
+    fi
+fi
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Debug summary
+# ---------------------------------------------------------------------------
+if [ "$verbose" -eq 1 ]; then
+    echo ""
+    echo "=== Debug Summary ========================================================"
+    [ "$show_qeng" -eq 1 ] && {
+        echo "  QENG attempts    : $qeng_attempt"
+        echo "  QENG time        : ${qeng_time}s"
+    }
+    [ "$show_ca" -eq 1 ] && {
+        echo "  QCAINFO attempts : $qca_attempt"
+        echo "  QCAINFO time     : ${qca_time}s"
+    }
+    echo "  Total runtime    : ${duration}s"
+    [ "$show_qeng" -eq 1 ] && [ -n "$qeng_line" ] && {
+        echo ""
+        echo "=== AT+QENG parsed fields (not shown in standard output) ================="
+        echo "  state         : $state"
+        echo "  freq_band_ind : $freq_band"
+        echo "  tac           : $tac"
+        echo "  cqi           : $cqi"
+        echo "  tx_power      : $tx_power"
+        echo "  srxlev        : $srxlev"
+        echo "  cellid_sec    : $cellid_sec"
+    }
+
+    echo "=========================================================================="
+fi
