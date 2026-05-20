@@ -1,5 +1,7 @@
 ## Simple scripts for Openwrt
 
+Some scripts tested on Openwrt 25.12.x
+
 To avoid creating a persistent HSTS file when using wget, you can add the following alias to /etc/shinit (or your shell initialization file): [ -x /usr/bin/wget ] && alias wget="wget --hsts-file=/dev/null"
 
 To append it automatically and ensure the change persists across upgrades, you can run:
@@ -20,15 +22,13 @@ export PATH=/tmp/bin:$PATH
 cd /tmp
 
 # Download scripts without creating persistent HSTS files
-wget --no-hsts -qO /tmp/bin/cell_band https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/cell_band
-wget --no-hsts -qO /tmp/bin/cell_info https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/cell_info
+wget --no-hsts -qO /tmp/bin/cell_status https://raw.githubusercontent.com/compact21/openwrt-script/refs/heads/main/cell_status
 
 # Make them executable
-chmod +x /tmp/bin/cell_band /tmp/bin/cell_info
+chmod +x /tmp/bin/cell_status
 
 # Run the scripts
-cell_band
-cell_info
+cell_status
 ```
 
 > **Note:** Everything in /tmp is stored in RAM and will disappear after a reboot.
@@ -36,12 +36,12 @@ Optionally, if you want to keep the scripts across reboots, you can copy them to
 
 Add /root/bin to your PATH
 
-If you want scripts copied to /root/bin to be available globally, add it to the PATH:
+If you want scripts into /root/bin to be available globally, add it to the PATH:
 
 ```sh
 mkdir -p /root/bin
 sed -i 's|^export PATH=".*"|export PATH="/usr/sbin:/usr/bin:/sbin:/bin:/root/bin"|' /etc/profile
 echo "/etc/profile" >> /etc/sysupgrade.conf
 echo "/root/" >> /etc/sysupgrade.conf
-cp /tmp/bin/cell_band /tmp/bin/cell_info /root/bin/
+mv /tmp/bin/cell_status /root/bin/
 ```
