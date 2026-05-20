@@ -77,7 +77,28 @@ fi
 
 # Connectivity checks
 check_ping_with_delay 1.1.1.1
+
+# Save ping status for future use (currently unused)
+# shellcheck disable=SC2034
 status1=$?
+
+# Run init-script.sh if it exists and is executable
+if [ -x "/tmp/mnt/rc-local/init-script.sh" ]; then
+    /tmp/mnt/rc-local/init-script.sh
+else
+    # IRQ affinity for hardware modem
+    MODEM_IRQ=$(grep "xhci-hcd" /proc/interrupts | awk -F: '{print $1}' | tr -d ' ')
+        if [ -n "$MODEM_IRQ" ]; then
+            for irq in $MODEM_IRQ; do
+                if [ -f "/proc/irq/$irq/smp_affinity" ]; then
+                    logger -t "$logheader" "set: \"echo 2 > /proc/irq/$irq/smp_affinity\""
+                    echo 2 > "/proc/irq/$irq/smp_affinity"
+                fi
+            done
+        else
+            logger -t "$logheader" "No modem IRQs found, skipping IRQ affinity setup"
+        fi
+fi
 
 # Update vnStat databases
 if [ -x /usr/bin/vnstat ]; then
