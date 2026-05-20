@@ -189,6 +189,7 @@ fi
 atcmd_block_file="/tmp/watchdog/atcmd_block"
 if [ -f "$atcmd_block_file" ]; then
     echo "I can't give at commands, the file $atcmd_block_file exists"
+    logger -t "$logheader" "Blocked: $atcmd_block_file exists, command not executed"
     exit 4
 fi
 
