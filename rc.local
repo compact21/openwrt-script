@@ -1,3 +1,4 @@
+cat /etc/rc.local 
 # Put your custom commands here that should be executed once
 # the system init finished. By default this file does nothing.
 
@@ -10,7 +11,7 @@ logger -t "$logheader" "start process /etc/rc.local"
 # Ensure /etc/shells exists with correct permissions
 [ ! -f /etc/shells ] && cp /rom/etc/shells /etc/shells && chmod 644 /etc/shells
 
-# Led switch off/restore 
+# Led switch off/restore (restore is currently commented out)
 if [ -x /usr/bin/mdio ]; then
     logger -t "$logheader" "disabling switch LEDs"
     mdio mt7530-0 0:0x1f raw 0x21 0x0008
@@ -54,17 +55,17 @@ check_ping_with_delay() {
 }
 
 # wifi off on boot
-wifi down > /dev/null 2>&1
+wifi down > /dev/null 2>&1 || logger -t "$logheader" "wifi down failed or not available"
 
 # Disable Voice led
 touch /tmp/voice_led_disable
 
-# Remove core dump files
+# Remove core dump files (optional, handled by crontab)
 #touch /tmp/clear-core-file
 
-# Run the initialization script if it exists and is executable
-if [ -x "/tmp/mnt/rc-local/setting_init_script" ]; then
-    /tmp/mnt/rc-local/setting_init_script
+# Run cell-lock.sh if it exists and is executable
+if [ -x "/tmp/mnt/rc-local/cell-lock.sh" ]; then
+    /tmp/mnt/rc-local/cell-lock.sh
 fi
 
 # Wait 60 seconds for WAN if LTE cell lock not applied; otherwise, remove the lockfile
@@ -75,7 +76,7 @@ else
     rm -f "$lockfile"
 fi
 
-# Connectivity checks
+# Connectivity checks (
 check_ping_with_delay 1.1.1.1
 
 # Save ping status for future use (currently unused)
@@ -88,16 +89,16 @@ if [ -x "/tmp/mnt/rc-local/init-script.sh" ]; then
 else
     # IRQ affinity for hardware modem
     MODEM_IRQ=$(grep "xhci-hcd" /proc/interrupts | awk -F: '{print $1}' | tr -d ' ')
-        if [ -n "$MODEM_IRQ" ]; then
-            for irq in $MODEM_IRQ; do
-                if [ -f "/proc/irq/$irq/smp_affinity" ]; then
-                    logger -t "$logheader" "set: \"echo 2 > /proc/irq/$irq/smp_affinity\""
-                    echo 2 > "/proc/irq/$irq/smp_affinity"
-                fi
-            done
-        else
-            logger -t "$logheader" "No modem IRQs found, skipping IRQ affinity setup"
-        fi
+    if [ -n "$MODEM_IRQ" ]; then
+        for irq in $MODEM_IRQ; do
+            if [ -f "/proc/irq/$irq/smp_affinity" ]; then
+                logger -t "$logheader" "set: \"echo 2 > /proc/irq/$irq/smp_affinity\""
+                echo 2 > "/proc/irq/$irq/smp_affinity"
+            fi
+        done
+    else
+        logger -t "$logheader" "No modem IRQs found, skipping IRQ affinity setup"
+    fi
 fi
 
 # Update vnStat databases
