@@ -108,6 +108,25 @@ do_cfun_reset() {
         fi
 }
 
+# Option 4: Modem sanity check
+# Verifies the modem is genuinely responsive, not just echoing OK.
+# Useful to diagnose zombie state before deciding which reset to apply.
+do_sanity_check() {
+    echo "--- Modem sanity check ---"
+    echo "Sends AT+CIMI to verify the modem is genuinely processing commands."
+    logger -t "$logheader" "Executing: modem sanity check"
+    if "$atcmd_bin" -Z; then
+        echo "Modem responding correctly."
+        logger -t "$logheader" "Sanity check: modem OK"
+    else
+        rc=$?
+        echo "WARNING: Modem may be in zombie state (exit code: $rc)."
+        echo "Suggested action: option 3 (SMART CFUN) or option 2 (USB reset)."
+        logger -t "$logheader" "Sanity check FAILED (exit code: $rc) - possible zombie state"
+        return 1
+    fi
+}
+
 # ------------------ MENU ---------------------------------------------
 
 echo
@@ -117,6 +136,7 @@ echo "Select operation:"
 echo "  1) Detach LTE connection (AT+CGATT=0)"
 echo "  2) Reset USB device (usbreset $usb_device_id)"
 echo "  3) Reset LTE module (SMART CFUN - AT+CFUN=1,1)"
+echo "  4) Modem sanity check (AT+CIMI)"
 echo
 read -r choice
 exit_code=0
@@ -125,6 +145,7 @@ case "$choice" in
     1) choice_label="AT+CGATT=0 detach";  do_cgatt_detach || exit_code=$? ;;
     2) choice_label="USB reset";          do_usb_reset    || exit_code=$? ;;
     3) choice_label="SMART CFUN reset";   do_cfun_reset   || exit_code=$? ;;
+    4) choice_label="Modem sanity check"; do_sanity_check || exit_code=$? ;;
     *) echo "Invalid option.";            exit 0 ;;
 esac
 logger -t "$logheader" "Done (choice=$choice: $choice_label, exit_code=$exit_code)"
