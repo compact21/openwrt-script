@@ -45,6 +45,8 @@ atcmd_qnwlock_file="" # Temp file for AT+QNWLOCK query output
 atcmd_cereg_file="" # Temp file for AT+CEREG? poll output
 atcmd_cgpaddr_file="" # Temp file for AT+CGPADDR=1 output
 atcmd_cpin_file="" # wait_for_modem_response(): AT+CPIN? output
+atcmd_sanity_file="" # Temp file for AT+CIMI sanity check output
+sanity_check=0 # Set by -Z flag; runs modem sanity check
 pidfile="/tmp/atcmd.pid" # PID file to prevent multiple concurrent instances
 watchdog_block_file="/tmp/watchdog/watchdog.block" # Watchdog block file path
 
@@ -130,6 +132,7 @@ cleanup() {
     [ -n "$atcmd_cereg_file" ] && [ -f "$atcmd_cereg_file" ] && rm -f "$atcmd_cereg_file"
     [ -n "$atcmd_cgpaddr_file" ] && [ -f "$atcmd_cgpaddr_file" ] && rm -f "$atcmd_cgpaddr_file"
     [ -n "$atcmd_cpin_file" ] && [ -f "$atcmd_cpin_file" ] && rm -f "$atcmd_cpin_file"
+    [ -n "$atcmd_sanity_file" ] && [ -f "$atcmd_sanity_file" ] && rm -f "$atcmd_sanity_file"
  
     # Remove watchdog block file
     [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file"
@@ -248,6 +251,9 @@ while [ $# -gt 0 ]; do
         -C|--smart-cfun)
             smart_cfun=1
             ;;
+        -Z|--sanity-check)
+            sanity_check=1
+            ;;
         -h|-help|--help|help)
             usage
             exit 0
@@ -275,9 +281,9 @@ while [ $# -gt 0 ]; do
 done
 
 # Validation: an AT command is required UNLESS smart mode is active
-if [ -z "$atcommand" ] && [ "$smart_cfun" -ne 1 ] && [ "$smart_qnwlock" -ne 1 ]; then
+if [ -z "$atcommand" ] && [ "$smart_cfun" -ne 1 ] && [ "$smart_qnwlock" -ne 1 ] && [ "$sanity_check" -ne 1 ]; then
     echo "ERROR: No AT command provided and no Smart Mode enabled."
-    echo "Usage: $0 [AT_COMMAND] or use -S / -C flags."
+    echo "Usage: $0 [AT_COMMAND] or use -S / -C / -Z flags."
     echo
     if [ -f "$usage_file" ]; then
         awk '/^Notes:/ {exit} {print}' "$usage_file"
@@ -426,6 +432,32 @@ unblock_watchdog() {
 check_ceer_log() {
     log "Send: AT+CEER (modem error diagnostic)..."
     send_at 'AT+CEER' || true
+}
+
+# Check modem is genuinely responsive, not just echoing OK.
+# Sends AT+CIMI - requires real SIM access, not just AT echo.
+# Returns 0 if modem is healthy, 1 if zombie state detected.
+check_modem_sanity() {
+    log "Modem sanity check (AT+CIMI)..."
+    atcmd_sanity_file=$(mktemp)
+
+    # Temporarily suppress logging and terminal output to protect IMSI privacy
+    _nologger_saved=$nologger
+    nologger=1
+    send_at "AT+CIMI" "$delaytime" "$atcmd_sanity_file" >/dev/null 2>&1
+    nologger=$_nologger_saved
+
+    imsi=$(tr '\r' '\n' < "$atcmd_sanity_file" | grep -oE '^[0-9]{10,15}$' | head -1)
+    rm -f "$atcmd_sanity_file"
+    atcmd_sanity_file=""
+
+    if [ -z "$imsi" ]; then
+        log "Modem sanity check FAILED - modem may be in zombie state"
+        return 1
+    fi
+
+    log "Modem sanity check OK (IMSI present)"
+    return 0
 }
 
 # Restart modem
@@ -582,6 +614,20 @@ smart_restart_procedure() {
     restart_modem
     restart_wan
 
+    # Verify modem is genuinely responsive after restart (zombie state check)
+    if ! check_modem_sanity; then
+        log "WARNING: modem sanity check failed after restart - modem may be in zombie state"
+        log "Attempting second modem restart..."
+        restart_modem
+        restart_wan
+        if ! check_modem_sanity; then
+            log "CRITICAL: modem still in zombie state after second restart"
+            check_ceer_log
+            unblock_watchdog
+            exit 12
+        fi
+    fi
+
     # Pass "qnwlock" flag only for QNWLOCK procedure so that
     # check_lte_connection will also log:
     #   AT+QNWLOCK="common/4g"  (configured cell lock list)
@@ -605,6 +651,14 @@ smart_restart_procedure() {
 
         restart_modem
         restart_wan
+
+        # Sanity check also after fallback restart
+        if ! check_modem_sanity; then
+            log "CRITICAL: modem in zombie state after fallback restart"
+            check_ceer_log
+            unblock_watchdog
+            exit 12
+        fi
 
         # Connectivity check after fallback - still log cell diagnostics for QNWLOCK
         # so we can see which cell the modem attached to after removing the lock
@@ -664,6 +718,18 @@ if [ "$smart_cfun" -eq 1 ]; then
     log "Executing SMART CFUN restart procedure..."
     smart_restart_procedure "SMART CFUN" "AT+CFUN=1,1"
     exit 0
+fi
+
+# Modem sanity check
+if [ "$sanity_check" -eq 1 ]; then
+    if [ -n "$atcommand" ]; then
+        echo "Error: \"-Z\" \"--sanity-check\" does not accept AT commands"
+        usage
+        exit 1
+    fi
+    log "Executing modem sanity check..."
+    check_modem_sanity
+    exit $?
 fi
 
 # Smart QNWLOCK procedure
