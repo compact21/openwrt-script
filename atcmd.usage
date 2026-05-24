@@ -21,6 +21,9 @@ Options:
   -C, --smart-cfun     Execute SMART CFUN procedure (AT+CFUN=1,1) with modem restart, WAN restart, and LTE connectivity check.
                        Does not accept additional AT commands.
 
+  -Z, --sanity-check   Check modem is genuinely responsive (AT+CIMI)
+                       Returns 0 if healthy, 1 if zombie state detected
+
   -h, --help, -help, help                      Show this help (brief usage)
   --help-full, -help-full, help-full, full     Show full documentation with examples
 
