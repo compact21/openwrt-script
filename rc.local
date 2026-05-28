@@ -76,7 +76,7 @@ else
     rm -f "$lockfile"
 fi
 
-# Connectivity checks (
+# Connectivity checks
 check_ping_with_delay 1.1.1.1
 
 # Save ping status for future use (currently unused)
@@ -127,20 +127,6 @@ if [ "$status2" -eq 0 ]; then
     fi
 else
     logger -t "$logheader" "WAN not ready, skipping NTP synchronization"
-fi
-
-
-# atd and watchdog_mbim scheduling
-check_ping_with_delay www.google.it
-status3=$?
-if [ -x /etc/init.d/atd ] && [ "$status3" -eq "0" ] && [ -x /etc/init.d/watchdog_mbim ]; then
-        /etc/init.d/atd reload
-        logger -t "$logheader" "run echo \"/etc/init.d/watchdog_mbim start\" | at now+10minutes"
-        echo "/etc/init.d/watchdog_mbim start" | at now+10minutes
-else
-        logger -t "$logheader" "Ping check failed, waiting 300s before starting watchdog"
-        sleep 300
-        /etc/init.d/watchdog_mbim start
 fi
 
 logger -t "$logheader" "save current /proc/interrupts into /tmp/boot/interrupts"
