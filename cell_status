@@ -4,6 +4,10 @@
 ping_server="9.9.9.9"
 max_wait=120 # seconds
 
+# Block files -- coordination with watchdog_mbim and atcmd
+atcmd_block_file="/tmp/watchdog/atcmd_block"
+watchdog_block_file="/tmp/watchdog/watchdog.block"
+
 # BTS lookup CSV -- used to resolve PCC EARFCN+PCI to location name
 # If file is absent, output is unchanged (no warning printed)
 BTS_CSV="/tmp/mnt/bin/bts.csv"
@@ -11,6 +15,18 @@ BTS_CSV="/tmp/mnt/bin/bts.csv"
 # Check ModemManager
 lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network)
 [ "$lteproto" -ne 0 ] && { echo "Script not compatible with ModemManager"; exit 1; }
+
+# Respect the watchdog recovery block file -- set by watchdog_mbim during safe_ifup
+if [ -f "$atcmd_block_file" ]; then
+    echo "watchdog recovery in progress, skipping"
+    exit 0
+fi
+
+# Respect the watchdog block file -- set by atcmd during smart procedures (CFUN, QNWLOCK)
+if [ -f "$watchdog_block_file" ]; then
+    echo "atcmd smart procedure in progress, skipping"
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Help
@@ -137,7 +153,7 @@ show_qeng=0
 #   n>0  : n locked cells follow as earfcn,pcid pairs
 # ---------------------------------------------------------------------------
 query_cell_lock() {
-    tmp_lock=$(mktemp)
+    tmp_lock=$(mktemp) || { echo "Error: mktemp failed in query_cell_lock"; return 1; }
     atstring=$(printf '%s\r\n' 'AT+QNWLOCK="common/4g"')
     picocom "/dev/ttyUSB2" --nolock --exit-after "$at_timeout" --quiet -t "$atstring" --logfile "$tmp_lock" > /dev/null
 
@@ -309,7 +325,7 @@ if [ "$show_qeng" -eq 1 ] || [ "$show_ca" -eq 1 ]; then
     else
         [ -z "$download_url" ] && { echo "Error: missing URL for download"; exit 1; }
         [ "$verbose" -eq 1 ] && echo "Downloading from $download_url..."
-        temp_download=$(mktemp /tmp/cellstatus_download.XXXXXX)
+        temp_download=$(mktemp /tmp/cellstatus_download.XXXXXX) || { echo "Error: mktemp failed for download"; exit 1; }
         curl -s -o "$temp_download" "$download_url" &
         traffic_pid=$!
     fi
@@ -363,7 +379,7 @@ if [ "$show_qeng" -eq 1 ]; then
     qeng_start=$(date +%s)
     while true; do
         qeng_attempt=$((qeng_attempt + 1))
-        tmp_qeng=$(mktemp)
+        tmp_qeng=$(mktemp) || { echo "Error: mktemp failed in AT+QENG loop"; exit 1; }
         atstring=$(printf '%s\r\n' 'AT+QENG="servingcell"')
         picocom "/dev/ttyUSB2" --nolock --exit-after "$at_timeout" --quiet -t "$atstring" --logfile "$tmp_qeng" > /dev/null
 
@@ -378,6 +394,7 @@ if [ "$show_qeng" -eq 1 ]; then
         [ "$elapsed" -ge "$max_wait" ] && { echo "Timeout: no LTE cell attached within $max_wait seconds"; exit 1; }
 
         rm -f "$tmp_qeng"
+        tmp_qeng=""
         sleep 1
     done
 
@@ -481,7 +498,7 @@ if [ "$show_ca" -eq 1 ]; then
     qca_start=$(date +%s)
     while true; do
         qca_attempt=$((qca_attempt + 1))
-        tmp_qca=$(mktemp)
+        tmp_qca=$(mktemp) || { echo "Error: mktemp failed in AT+QCAINFO loop"; exit 1; }
         atstring=$(printf '%s\r\n' 'AT+QCAINFO')
         picocom "/dev/ttyUSB2" --nolock --exit-after "$at_timeout" --quiet -t "$atstring" --logfile "$tmp_qca" > /dev/null 2>&1
 
@@ -496,6 +513,7 @@ if [ "$show_ca" -eq 1 ]; then
         [ "$elapsed" -ge "$max_wait" ] && { echo "CA timeout ($max_wait s)"; break; }
 
         rm -f "$tmp_qca"
+        tmp_qca=""
         sleep 1
     done
 
