@@ -51,7 +51,7 @@ sanity_check=0 # Set by -Z flag; runs modem sanity check
 watchdog_block_file="/tmp/watchdog/watchdog.block" # Watchdog block file path
 watchdog_locked=0 # Tracks whether this script created the watchdog block file
 
-# Atomic lock directory — replaces pidfile to avoid race condition.
+# Atomic lock directory replaces pidfile to avoid race condition.
 # mkdir is atomic even on busybox/tmpfs.
 lockdir="/tmp/lock/atcmd.lock"
 
@@ -92,7 +92,7 @@ usage_full() {
     esac
 }
 
-# Atomic lock: mkdir is atomic on tmpfs/busybox — no race condition between
+# Atomic lock: mkdir is atomic on tmpfs/busybox no race condition between
 # check and creation. If another instance is running, mkdir fails immediately.
 # Ensure /tmp/lock exists (it should, but guard against edge cases).
 mkdir -p /tmp/lock 2>/dev/null
@@ -100,22 +100,6 @@ if ! mkdir "$lockdir" 2>/dev/null; then
     echo "Another instance is already running ($lockdir exists)"
     exit 1
 fi
-
-# Early exit for help flags — skip all hardware/interface checks
-for arg in "$@"; do
-    case "$arg" in
-        -h|-help|--help|help)
-            usage
-            rm -rf "$lockdir"
-            exit 0
-            ;;
-        -help-full|--help-full|help-full|full)
-            usage_full
-            rm -rf "$lockdir"
-            exit 0
-            ;;
-    esac
-done
 
 # Cleanup function
 cleanup() {
@@ -134,9 +118,25 @@ cleanup() {
     [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file"
 }
 
-# Set up a trap to cleanup on exit or interruption
+# Set up a trap to cleanup on exit or interruption.
+# Registered BEFORE the early-exit help block so that cleanup() is always
+# active and the lock is always removed — no manual rm -rf needed anywhere.
 # Signals handled: EXIT (normal exit), INT (Ctrl+C), TERM (termination)
 trap 'cleanup' EXIT INT TERM
+
+# Early exit for help flags skip all hardware/interface checks
+for arg in "$@"; do
+    case "$arg" in
+        -h|-help|--help|help)
+            usage
+            exit 0
+            ;;
+        -help-full|--help-full|help-full|full)
+            usage_full
+            exit 0
+            ;;
+    esac
+done
 
 # Save the original command for eventual logging
 orig_command="$0"
@@ -150,18 +150,39 @@ if ! command -v picocom > /dev/null; then
     exit 1
 fi
 
-# Check if the AT port (ttyport) exists
-if [ ! -e "$ttyport" ]; then
-    echo "Error: AT port $ttyport not found."
-    exit 2
+# Check if ubus is installed
+if ! command -v ubus > /dev/null; then
+    echo "Error: ubus is not installed. Please install it (ubus package) to run this script."
+    exit 1
 fi
+
+# Check if jsonfilter is installed
+if ! command -v jsonfilter > /dev/null; then
+    echo "Error: jsonfilter is not installed. Please install it (jsonfilter package) to run this script."
+    exit 1
+fi
+
+# Wait for the AT port (ttyport) to appear, up to ttyport_timeout seconds.
+# The port may not be present immediately at boot or after a modem reset,
+# so a simple existence check would cause a spurious exit 2.
+echo "Waiting for AT port $ttyport..."
+_tty_wait_start=$(date +%s)
+while [ ! -e "$ttyport" ]; do
+    _tty_elapsed=$(( $(date +%s) - _tty_wait_start ))
+    if [ "$_tty_elapsed" -ge "$ttyport_timeout" ]; then
+        echo "Error: AT port $ttyport not found after ${ttyport_timeout}s timeout."
+        exit 2
+    fi
+    sleep "$sleep_interval"
+done
+echo "AT port $ttyport found."
 
 # Check if ttyport is already in use by another process.
 # Uses lsof if available (more efficient than /proc scan); falls back to /proc scan.
 ttyport_real=$(readlink -f "$ttyport")
 tty_busy_pid=""
 if command -v lsof >/dev/null 2>&1; then
-    tty_busy_pid=$(lsof -t "$ttyport_real" 2>/dev/null | head -1)
+    tty_busy_pid=$(lsof -t "$ttyport_real" 2>/dev/null | head -n 1)
 else
     # Fallback: scan /proc (heavier but works without lsof)
     for pid_fd in /proc/[0-9]*/fd/*; do
@@ -197,6 +218,7 @@ if [ -z "$wan_device" ]; then
     echo "Error: interface \"$wan_iface\" not found or not yet created."
     echo "Check that \"$wan_iface\" exists in /etc/config/network and that the network service is running."
     echo "Alternatively, edit this script and set the variable wan_iface to match your network configuration."
+    echo "Run 'ubus list network.interface.*' to see all available interfaces."
     exit 5
 fi
 
@@ -468,7 +490,7 @@ check_modem_sanity() {
     send_at "AT+CIMI" "$delaytime" "$atcmd_sanity_file" >/dev/null 2>&1
     nologger=$_nologger_saved
 
-    imsi=$(tr '\r' '\n' < "$atcmd_sanity_file" | grep -oE '^[0-9]{10,15}$' | head -1)
+    imsi=$(tr '\r' '\n' < "$atcmd_sanity_file" | grep -oE '^[0-9]{10,15}$' | head -n 1)
     rm -f "$atcmd_sanity_file"
     atcmd_sanity_file=""
 
