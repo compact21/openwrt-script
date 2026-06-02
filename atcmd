@@ -92,141 +92,29 @@ usage_full() {
     esac
 }
 
-# Atomic lock: mkdir is atomic on tmpfs/busybox no race condition between
-# check and creation. If another instance is running, mkdir fails immediately.
-# Ensure /tmp/lock exists (it should, but guard against edge cases).
-mkdir -p /tmp/lock 2>/dev/null
-if ! mkdir "$lockdir" 2>/dev/null; then
-    echo "Another instance is already running ($lockdir exists)"
-    exit 1
-fi
-
 # Cleanup function
+# shellcheck disable=SC2329
 cleanup() {
     # Remove atomic lock directory
-    rm -rf "$lockdir"
+    rm -rf "$lockdir" 2>/dev/null || true
 
     # Remove temp files only if they exist
-    [ -n "$atcmd_sendfile" ]     && [ -f "$atcmd_sendfile" ]     && rm -f "$atcmd_sendfile"
-    [ -n "$atcmd_qnwlock_file" ] && [ -f "$atcmd_qnwlock_file" ] && rm -f "$atcmd_qnwlock_file"
-    [ -n "$atcmd_cereg_file" ]   && [ -f "$atcmd_cereg_file" ]   && rm -f "$atcmd_cereg_file"
-    [ -n "$atcmd_cgpaddr_file" ] && [ -f "$atcmd_cgpaddr_file" ] && rm -f "$atcmd_cgpaddr_file"
-    [ -n "$atcmd_cpin_file" ]    && [ -f "$atcmd_cpin_file" ]    && rm -f "$atcmd_cpin_file"
-    [ -n "$atcmd_sanity_file" ]  && [ -f "$atcmd_sanity_file" ]  && rm -f "$atcmd_sanity_file"
+    [ -n "$atcmd_sendfile" ]     && [ -f "$atcmd_sendfile" ]     && rm -f "$atcmd_sendfile" 2>/dev/null || true
+    [ -n "$atcmd_qnwlock_file" ] && [ -f "$atcmd_qnwlock_file" ] && rm -f "$atcmd_qnwlock_file" 2>/dev/null || true
+    [ -n "$atcmd_cereg_file" ]   && [ -f "$atcmd_cereg_file" ]   && rm -f "$atcmd_cereg_file" 2>/dev/null || true
+    [ -n "$atcmd_cgpaddr_file" ] && [ -f "$atcmd_cgpaddr_file" ] && rm -f "$atcmd_cgpaddr_file" 2>/dev/null || true
+    [ -n "$atcmd_cpin_file" ]    && [ -f "$atcmd_cpin_file" ]    && rm -f "$atcmd_cpin_file" 2>/dev/null || true
+    [ -n "$atcmd_sanity_file" ]  && [ -f "$atcmd_sanity_file" ]  && rm -f "$atcmd_sanity_file" 2>/dev/null || true
 
     # Remove watchdog block file only if created by this script
-    [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file"
+    [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file" 2>/dev/null || true
 }
 
 # Set up a trap to cleanup on exit or interruption.
 # Registered BEFORE the early-exit help block so that cleanup() is always
-# active and the lock is always removed — no manual rm -rf needed anywhere.
+# active and the lock is always removed no manual rm -rf needed anywhere.
 # Signals handled: EXIT (normal exit), INT (Ctrl+C), TERM (termination)
 trap 'cleanup' EXIT INT TERM
-
-# Early exit for help flags skip all hardware/interface checks
-for arg in "$@"; do
-    case "$arg" in
-        -h|-help|--help|help)
-            usage
-            exit 0
-            ;;
-        -help-full|--help-full|help-full|full)
-            usage_full
-            exit 0
-            ;;
-    esac
-done
-
-# Save the original command for eventual logging
-orig_command="$0"
-for arg in "$@"; do
-    orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
-done
-
-# Check if picocom is installed
-if ! command -v picocom > /dev/null; then
-    echo "Error: picocom is not installed. Please install it to run this script."
-    exit 1
-fi
-
-# Check if ubus is installed
-if ! command -v ubus > /dev/null; then
-    echo "Error: ubus is not installed. Please install it (ubus package) to run this script."
-    exit 1
-fi
-
-# Check if jsonfilter is installed
-if ! command -v jsonfilter > /dev/null; then
-    echo "Error: jsonfilter is not installed. Please install it (jsonfilter package) to run this script."
-    exit 1
-fi
-
-# Wait for the AT port (ttyport) to appear, up to ttyport_timeout seconds.
-# The port may not be present immediately at boot or after a modem reset,
-# so a simple existence check would cause a spurious exit 2.
-echo "Waiting for AT port $ttyport..."
-_tty_wait_start=$(date +%s)
-while [ ! -e "$ttyport" ]; do
-    _tty_elapsed=$(( $(date +%s) - _tty_wait_start ))
-    if [ "$_tty_elapsed" -ge "$ttyport_timeout" ]; then
-        echo "Error: AT port $ttyport not found after ${ttyport_timeout}s timeout."
-        exit 2
-    fi
-    sleep "$sleep_interval"
-done
-echo "AT port $ttyport found."
-
-# Check if ttyport is already in use by another process.
-# Uses lsof if available (more efficient than /proc scan); falls back to /proc scan.
-ttyport_real=$(readlink -f "$ttyport")
-tty_busy_pid=""
-if command -v lsof >/dev/null 2>&1; then
-    tty_busy_pid=$(lsof -t "$ttyport_real" 2>/dev/null | head -n 1)
-else
-    # Fallback: scan /proc (heavier but works without lsof)
-    for pid_fd in /proc/[0-9]*/fd/*; do
-        if [ "$(readlink -f "$pid_fd" 2>/dev/null)" = "$ttyport_real" ]; then
-            tty_busy_pid=$(echo "$pid_fd" | cut -d'/' -f3)
-            break
-        fi
-    done
-fi
-if [ -n "$tty_busy_pid" ]; then
-    busy_cmd=$(cat /proc/"$tty_busy_pid"/comm 2>/dev/null || echo "unknown")
-    echo "Error: AT port $ttyport is already in use by process $tty_busy_pid ($busy_cmd)."
-    exit 6
-fi
-
-# Check if $atcmd_dir directory exists, if not, create it
-mkdir -p "$atcmd_dir" || { echo "Error: Unable to create $atcmd_dir directory."; exit 8; }
-
-# Check if /tmp/watchdog/ directory exists, if not, create it
-mkdir -p "/tmp/watchdog/" || { echo "Error: Unable to create \"/tmp/watchdog/\" directory."; exit 8; }
-
-# Check compatibility with ModemManager
-lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network || true)
-if [ "$lteproto" -ne 0 ]; then
-    echo "Error: Script not compatible with \"ModemManager\""
-    exit 3
-fi
-
-# Check that wan_iface exists and resolve its L2 device via ubus.
-wan_device=$(ubus call network.interface."$wan_iface" status 2>/dev/null | \
-    jsonfilter -e '@.l3_device')
-if [ -z "$wan_device" ]; then
-    echo "Error: interface \"$wan_iface\" not found or not yet created."
-    echo "Check that \"$wan_iface\" exists in /etc/config/network and that the network service is running."
-    echo "Alternatively, edit this script and set the variable wan_iface to match your network configuration."
-    echo "Run 'ubus list network.interface.*' to see all available interfaces."
-    exit 5
-fi
-
-# Show usage and exit if no arguments were provided
-if [ $# -eq 0 ]; then
-    usage
-    exit 1
-fi
 
 # Argument Parsing
 while [ $# -gt 0 ]; do
@@ -300,6 +188,104 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# Save the original command for eventual logging
+orig_command="$0"
+for arg in "$@"; do
+    # Escape single quotes for shell re-use
+    escaped=$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")
+    orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
+done
+
+# Check if picocom is installed
+if ! command -v picocom > /dev/null; then
+    echo "Error: picocom is not installed. Please install it to run this script."
+    exit 1
+fi
+
+# Check if ubus is installed
+if ! command -v ubus > /dev/null; then
+    echo "Error: ubus is not installed. Please install it (ubus package) to run this script."
+    exit 1
+fi
+
+# Check if jsonfilter is installed
+if ! command -v jsonfilter > /dev/null; then
+    echo "Error: jsonfilter is not installed. Please install it (jsonfilter package) to run this script."
+    exit 1
+fi
+
+# Wait for the AT port (ttyport) to appear, up to ttyport_timeout seconds.
+# The port may not be present immediately at boot or after a modem reset,
+# so a simple existence check would cause a spurious exit 2.
+tty_wait_start=$(date +%s)
+while [ ! -e "$ttyport" ]; do
+    tty_elapsed=$(( $(date +%s) - tty_wait_start ))
+    if [ "$tty_elapsed" -ge "$ttyport_timeout" ]; then
+        echo "Error: AT port $ttyport not found after ${ttyport_timeout}s timeout."
+        exit 2
+    fi
+    sleep "$sleep_interval"
+done
+
+# Check if ttyport is already in use by another process.
+# Uses lsof if available (more efficient than /proc scan); falls back to /proc scan.
+ttyport_real=$(readlink -f "$ttyport")
+tty_busy_pid=""
+if command -v lsof >/dev/null 2>&1; then
+    tty_busy_pid=$(lsof -t "$ttyport_real" 2>/dev/null | head -n 1)
+else
+    # Fallback: scan /proc (heavier but works without lsof)
+    for pid_fd in /proc/[0-9]*/fd/*; do
+        if [ "$(readlink -f "$pid_fd" 2>/dev/null)" = "$ttyport_real" ]; then
+            tty_busy_pid=$(echo "$pid_fd" | cut -d'/' -f3)
+            break
+        fi
+    done
+fi
+if [ -n "$tty_busy_pid" ]; then
+    busy_cmd=$(cat /proc/"$tty_busy_pid"/comm 2>/dev/null || echo "unknown")
+    echo "Error: AT port $ttyport is already in use by process $tty_busy_pid ($busy_cmd)."
+    exit 6
+fi
+
+# Atomic lock: mkdir is atomic on tmpfs/busybox no race condition between
+# check and creation. If another instance is running, mkdir fails immediately.
+# Ensure /tmp/lock exists (it should, but guard against edge cases).
+mkdir -p /tmp/lock 2>/dev/null
+if [ "$internal_watchdog" -ne 1 ]; then
+    if ! mkdir "$lockdir" 2>/dev/null; then
+        echo "Another instance is already running ($lockdir exists)"
+        exit 20
+    fi
+else
+    # watchdog interno: bypass lock
+    logger -t "$logheader" "Watchdog mode: skipping atomic lock"
+fi
+
+# Check if $atcmd_dir directory exists, if not, create it
+mkdir -p "$atcmd_dir" || { echo "Error: Unable to create $atcmd_dir directory."; exit 8; }
+
+# Check if /tmp/watchdog/ directory exists, if not, create it
+mkdir -p "/tmp/watchdog/" || { echo "Error: Unable to create \"/tmp/watchdog/\" directory."; exit 8; }
+
+# Check compatibility with ModemManager
+lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network || true)
+if [ "$lteproto" -ne 0 ]; then
+    echo "Error: Script not compatible with \"ModemManager\""
+    exit 3
+fi
+
+# Check that wan_iface exists and resolve its L2 device via ubus.
+wan_device=$(ubus call network.interface."$wan_iface" status 2>/dev/null | \
+    jsonfilter -e '@.l3_device')
+if [ -z "$wan_device" ]; then
+    echo "Error: interface \"$wan_iface\" not found or not yet created."
+    echo "Check that \"$wan_iface\" exists in /etc/config/network and that the network service is running."
+    echo "Alternatively, edit this script and set the variable wan_iface to match your network configuration."
+    echo "Run 'ubus list network.interface.*' to see all available interfaces."
+    exit 5
+fi
+
 # Check if atcmd is blocked by watchdog_mbim
 atcmd_block_file="/tmp/watchdog/atcmd_block"
 if [ -f "$atcmd_block_file" ] && [ "$internal_watchdog" -ne 1 ]; then
@@ -309,6 +295,7 @@ if [ -f "$atcmd_block_file" ] && [ "$internal_watchdog" -ne 1 ]; then
 fi
 if [ "$internal_watchdog" -eq 1 ]; then
     logger -t "$logheader" "Internal watchdog mode enabled"
+    nologger=1
 fi
 
 # Validate delaytime: must be numeric and > 0
@@ -660,8 +647,9 @@ smart_restart_procedure() {
     else
         check_lte_connection
     fi
+    check_lte_connection_rc=$?
 
-    if [ $? -eq 0 ]; then
+    if [ "$check_lte_connection_rc" -eq 0 ]; then
         log "$type completed successfully"
     else
         log "$type failed, attempting fallback..."
