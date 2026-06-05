@@ -46,10 +46,19 @@ atcmd_qnwlock_file="" # Temp file for AT+QNWLOCK query output
 atcmd_cereg_file="" # Temp file for AT+CEREG? poll output
 atcmd_cgpaddr_file="" # Temp file for AT+CGPADDR=1 output
 atcmd_cpin_file="" # wait_for_modem_response(): AT+CPIN? output
+atcmd_qcsq_file="" # Temp file for AT+QCSQ signal quality output
 atcmd_sanity_file="" # Temp file for AT+CIMI sanity check output
 sanity_check=0 # Set by -Z flag; runs modem sanity check
 watchdog_block_file="/tmp/watchdog/watchdog.block" # Watchdog block file path
 watchdog_locked=0 # Tracks whether this script created the watchdog block file
+
+# CFUN daily limit
+# Quectel EG18-EA firmware recommends no more than 30 CFUN/power operations
+# per day to preserve flash lifespan. This counter enforces a limit of 15
+# invocations per 86400s window (monotonic uptime-based, immune to NTP).
+atcmd_cfun_file="/tmp/watchdog/atcmd_cfun_count"
+atcmd_cfun_window_file="/tmp/watchdog/atcmd_cfun_window_start"
+atcmd_cfun_max=15
 
 # Atomic lock directory replaces pidfile to avoid race condition.
 # mkdir is atomic even on busybox/tmpfs.
@@ -92,6 +101,15 @@ usage_full() {
     esac
 }
 
+# Read system uptime in whole seconds from /proc/uptime.
+# Uses only the monotonic uptime counter - immune to NTP adjustments.
+# Returns empty string on read failure.
+get_uptime_sec() {
+    read -r up _ < /proc/uptime 2>/dev/null
+    up="${up%.*}"
+    [ -n "$up" ] && echo "$up"
+}
+
 # Cleanup function
 # shellcheck disable=SC2329
 cleanup() {
@@ -99,15 +117,16 @@ cleanup() {
     rm -rf "$lockdir" 2>/dev/null || true
 
     # Remove temp files only if they exist
-    [ -n "$atcmd_sendfile" ]     && [ -f "$atcmd_sendfile" ]     && rm -f "$atcmd_sendfile" 2>/dev/null || true
-    [ -n "$atcmd_qnwlock_file" ] && [ -f "$atcmd_qnwlock_file" ] && rm -f "$atcmd_qnwlock_file" 2>/dev/null || true
-    [ -n "$atcmd_cereg_file" ]   && [ -f "$atcmd_cereg_file" ]   && rm -f "$atcmd_cereg_file" 2>/dev/null || true
-    [ -n "$atcmd_cgpaddr_file" ] && [ -f "$atcmd_cgpaddr_file" ] && rm -f "$atcmd_cgpaddr_file" 2>/dev/null || true
-    [ -n "$atcmd_cpin_file" ]    && [ -f "$atcmd_cpin_file" ]    && rm -f "$atcmd_cpin_file" 2>/dev/null || true
-    [ -n "$atcmd_sanity_file" ]  && [ -f "$atcmd_sanity_file" ]  && rm -f "$atcmd_sanity_file" 2>/dev/null || true
+    [ -n "$atcmd_sendfile" ]     && [ -f "$atcmd_sendfile" ]     && rm -f "$atcmd_sendfile"
+    [ -n "$atcmd_qnwlock_file" ] && [ -f "$atcmd_qnwlock_file" ] && rm -f "$atcmd_qnwlock_file"
+    [ -n "$atcmd_cereg_file" ]   && [ -f "$atcmd_cereg_file" ]   && rm -f "$atcmd_cereg_file"
+    [ -n "$atcmd_cgpaddr_file" ] && [ -f "$atcmd_cgpaddr_file" ] && rm -f "$atcmd_cgpaddr_file"
+    [ -n "$atcmd_cpin_file" ]    && [ -f "$atcmd_cpin_file" ]    && rm -f "$atcmd_cpin_file"
+    [ -n "$atcmd_sanity_file" ]  && [ -f "$atcmd_sanity_file" ]  && rm -f "$atcmd_sanity_file"
+    [ -n "$atcmd_qcsq_file" ]    && [ -f "$atcmd_qcsq_file" ]    && rm -f "$atcmd_qcsq_file"
 
     # Remove watchdog block file only if created by this script
-    [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file" 2>/dev/null || true
+    [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file"
 }
 
 # Set up a trap to cleanup on exit or interruption.
@@ -115,6 +134,13 @@ cleanup() {
 # active and the lock is always removed no manual rm -rf needed anywhere.
 # Signals handled: EXIT (normal exit), INT (Ctrl+C), TERM (termination)
 trap 'cleanup' EXIT INT TERM
+
+# Save the original command for eventual logging
+orig_command="$0"
+for arg in "$@"; do
+    orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
+done
+
 
 # Argument Parsing
 while [ $# -gt 0 ]; do
@@ -188,14 +214,6 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-# Save the original command for eventual logging
-orig_command="$0"
-for arg in "$@"; do
-    # Escape single quotes for shell re-use
-    escaped=$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")
-    orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
-done
-
 # Check if picocom is installed
 if ! command -v picocom > /dev/null; then
     echo "Error: picocom is not installed. Please install it to run this script."
@@ -217,9 +235,9 @@ fi
 # Wait for the AT port (ttyport) to appear, up to ttyport_timeout seconds.
 # The port may not be present immediately at boot or after a modem reset,
 # so a simple existence check would cause a spurious exit 2.
-tty_wait_start=$(date +%s)
+tty_wait_start=$(get_uptime_sec)
 while [ ! -e "$ttyport" ]; do
-    tty_elapsed=$(( $(date +%s) - tty_wait_start ))
+    tty_elapsed=$(( $(get_uptime_sec) - tty_wait_start ))
     if [ "$tty_elapsed" -ge "$ttyport_timeout" ]; then
         echo "Error: AT port $ttyport not found after ${ttyport_timeout}s timeout."
         exit 2
@@ -392,9 +410,9 @@ send_at() {
 # Function to wait for the modem to be ready
 wait_for_modem() {
     log "Waiting for the device $ttyport to be ready..."
-    wait_start=$(date +%s)
+    wait_start=$(get_uptime_sec)
     while [ ! -e "$ttyport" ]; do
-        now=$(date +%s)
+        now=$(get_uptime_sec)
         elapsed=$((now-wait_start))
         if [ $elapsed -ge $ttyport_timeout ]; then
             log "Error: Timeout - $ttyport not detected!"
@@ -472,10 +490,10 @@ check_modem_sanity() {
     log "Modem sanity check (AT+CIMI)..."
     atcmd_sanity_file=$(mktemp) || { log "check_modem_sanity: mktemp failed"; return 1; }
 
-    _nologger_saved=$nologger
+    nologger_saved=$nologger
     nologger=1
     send_at "AT+CIMI" "$delaytime" "$atcmd_sanity_file" >/dev/null 2>&1
-    nologger=$_nologger_saved
+    nologger=$nologger_saved
 
     imsi=$(tr '\r' '\n' < "$atcmd_sanity_file" | grep -oE '^[0-9]{10,15}$' | head -n 1)
     rm -f "$atcmd_sanity_file"
@@ -529,6 +547,16 @@ check_lte_connection() {
         if grep -qE "\+CEREG: [0-9],(1|5)" "$atcmd_cereg_file"; then
             log "Modem registered on LTE network."
             creg_ok=1
+            # Signal quality check
+            log "Checking signal quality (AT+QCSQ)..."
+            atcmd_qcsq_file=$(mktemp) || { log "check_lte_connection: mktemp failed (qcsq)"; }
+            send_at "AT+QCSQ" "$delaytime" "$atcmd_qcsq_file" || true
+            qcsq_raw=$(grep -oE '\+QCSQ: [^\r]+' "$atcmd_qcsq_file" | head -n 1)
+            if [ -n "$qcsq_raw" ]; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') $qcsq_raw" > /tmp/watchdog/last_qcsq
+                log "QCSQ saved: $qcsq_raw"
+            fi
+            rm -f "$atcmd_qcsq_file"
             break
         fi
         log "Waiting for network registration... ($i/15)"
@@ -616,6 +644,58 @@ check_lte_connection() {
     fi
 }
 
+# Check and enforce daily CFUN invocation limit (uptime-based, immune to NTP).
+# Returns 0 if invocation is allowed, 1 if daily limit reached.
+check_cfun_limit() {
+    # Load counter
+    atcmd_cfun_count=0
+    if [ -r "$atcmd_cfun_file" ]; then
+        read -r atcmd_cfun_count < "$atcmd_cfun_file"
+    fi
+    case "${atcmd_cfun_count:-}" in
+        ''|*[!0-9]*) atcmd_cfun_count=0 ;;
+    esac
+
+    # Load or init window start
+    now_up=$(cat /proc/uptime 2>/dev/null | cut -d' ' -f1 | cut -d'.' -f1)
+    if [ -r "$atcmd_cfun_window_file" ]; then
+        read -r atcmd_cfun_window_start < "$atcmd_cfun_window_file"
+    else
+        atcmd_cfun_window_start=$now_up
+        echo "$atcmd_cfun_window_start" > "$atcmd_cfun_window_file"
+    fi
+    case "${atcmd_cfun_window_start:-}" in
+        ''|*[!0-9]*) atcmd_cfun_window_start=$now_up ;;
+    esac
+
+    # Safety: window start in the future
+    if [ "$atcmd_cfun_window_start" -gt "$now_up" ] 2>/dev/null; then
+        atcmd_cfun_window_start=$now_up
+        echo "$atcmd_cfun_window_start" > "$atcmd_cfun_window_file"
+    fi
+
+    # Reset window if 86400s elapsed
+    if [ $(( now_up - atcmd_cfun_window_start )) -ge 86400 ]; then
+        log "atcmd -C daily window reset (count was $atcmd_cfun_count)"
+        atcmd_cfun_count=0
+        echo "$atcmd_cfun_count" > "$atcmd_cfun_file"
+        atcmd_cfun_window_start=$now_up
+        echo "$atcmd_cfun_window_start" > "$atcmd_cfun_window_file"
+    fi
+
+    # Check limit
+    if [ "$atcmd_cfun_count" -ge "$atcmd_cfun_max" ]; then
+        log "atcmd -C daily limit reached ($atcmd_cfun_count/$atcmd_cfun_max), aborting"
+        return 1
+    fi
+
+    # Increment counter
+    atcmd_cfun_count=$(( atcmd_cfun_count + 1 ))
+    echo "$atcmd_cfun_count" > "$atcmd_cfun_file"
+    log "atcmd -C invocation $atcmd_cfun_count/$atcmd_cfun_max"
+    return 0
+}
+
 # smart_restart_procedure <type> [at_command]
 smart_restart_procedure() {
     type="$1"
@@ -697,6 +777,10 @@ if [ "$smart_cfun" -eq 1 ]; then
         echo "Error: \"-C\" \"--smart-cfun\" does not accept AT commands"
         usage
         exit 1
+    fi
+    # Check daily limit before executing
+    if ! check_cfun_limit; then
+        exit 11  # exit code specifico: limit reached
     fi
     log "Executing SMART CFUN restart procedure..."
     smart_restart_procedure "SMART CFUN" "AT+CFUN=1,1"
