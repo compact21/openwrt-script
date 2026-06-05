@@ -148,8 +148,8 @@ atcmd 'AT+QNWLOCK="common/4g",1,1650,100'; # Single cell lock without check or f
 # If the cell-lock is 0 or not present, it will just execute the standard AT command.
 
 # Smart QNWLOCK examples
-atcmd -S 'AT+QNWLOCK="common/4g"'                             # Execute standard command only
-atcmd -S 'AT+QNWLOCK="common/4g",0'                           # Execute SMART only if cell-locks are active
+atcmd -S 'AT+QNWLOCK="common/4g"';                            # Execute standard command only
+atcmd -S 'AT+QNWLOCK="common/4g",0';                          # Execute SMART only if cell-locks are active
 atcmd -S 'AT+QNWLOCK="common/4g",1,1650,100;                  # Monte Bondone Cima Palon 230131 or 231131
 atcmd -S 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Cima Palon 230131 or 231131
 
