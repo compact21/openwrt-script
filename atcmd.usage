@@ -30,6 +30,7 @@ Options:
 Notes:
 
   - If -a/--at is omitted, the first non-option argument is treated as the AT command.
+  - atcmd -C exits with code 11 if the daily CFUN invocation limit has been reached (15/24h window).
   - The default AT port is /dev/ttyUSB2.
   - The WAN interface name is configured via wan_iface at the top of the script.
   - This utility is not compatible with ModemManager.
@@ -79,6 +80,7 @@ atcmd 'AT+CPWD="SC","OLD","NEW"' # Change SIM PIN
 # Network Information
 atcmd 'AT+CGPADDR=1';     # Show current IP address
 atcmd 'AT+CSQ';           # Show signal quality [ atcmd -d 500 -a 'AT+CSQ'; # Delay 500ms ]
+atcmd 'AT+QCSQ';          # Show signal quality (RSRP, SINR, RSRQ) - format: +QCSQ: "LTE",<rssi>,<rsrp>,<sinr>,<rsrq>
 atcmd 'AT+QRSRP';         # Show RSRP signal level
 atcmd 'AT+QSINR';         # Show SINR value (format: <pcc>,<scc1>,<scc2>,<scc3>)
 atcmd 'AT+CEREG?';        # Check LTE network registration
@@ -101,10 +103,10 @@ atcmd 'AT+CPMS="ME","ME","ME"'; atcmd 'AT+CSAS'; # Set and save SMS storage to M
 atcmd 'AT+QCFG="call_control",1,1';              # Disable voice call support
 
 # LTE Bands
-atcmd 'AT+QCFG="band",0,5,1';                   # Use LTE bands 1+3 only
-atcmd 'AT+QCFG="band",0,45,1';                  # Use LTE bands 1+3+7 only
-atcmd 'AT+QCFG="band",0,80045,1';               # Use LTE bands 1+3+7+20 only
-atcmd 'AT+QCFG="band",8d0,1A0080800D5,1';       # Enable all supported LTE bands (EG18-EA)
+atcmd 'AT+QCFG="band",0,5,0,1';                # Use LTE bands 1+3 only
+atcmd 'AT+QCFG="band",0,45,0,1';               # Use LTE bands 1+3+7 only
+atcmd 'AT+QCFG="band",0,80045,0,1';            # Use LTE bands 1+3+7+20 only
+atcmd 'AT+QCFG="band",8d0,1A0080800D5,0,1';    # Enable all supported LTE bands (EG18-EA)
 
 # USB / Network Interface
 atcmd 'AT+QCFG="usbnet"';                             # Show USB network type (0=qmi, 1=ecm, 2=mbim) ** WARNING: mode 3=RNDIS is NOT supported on Linux, only Windows **
@@ -157,16 +159,17 @@ atcmd -S 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Ci
 
 # SMART CFUN performs a full modem restart and connectivity verification:
 # 1. Blocks the watchdog to prevent interference.
-# 2. Sends AT+CFUN=1,1 to perform a soft modem restart.
-# 3. Waits for the modem device (/dev/ttyUSB2) to be ready.
-# 4. Checks if the modem responds to basic "AT" commands.
-# 5. Restarts the WAN interface (ubus down/up) to refresh network connectivity.
-# 6. Waits for LTE registration and interface readiness.
-# 7. Verifies PDP IP address assigned by the modem.
-# 8. Confirms that the network interface has an IPv4 address.
-# 9. Performs ping tests to ensure LTE connectivity.
-# 10. Logs results to syslog and terminal.
-# 11. Unblocks the watchdog at the end of the procedure.
+# 2. Checks daily CFUN invocation limit (max 15/24h). Exits with code 11 if limit reached.
+# 3. Sends AT+CFUN=1,1 to perform a soft modem restart.
+# 4. Waits for the modem device (/dev/ttyUSB2) to be ready.
+# 5. Checks if the modem responds to basic "AT" commands.
+# 6. Restarts the WAN interface (ubus down/up) to refresh network connectivity.
+# 7. Waits for LTE registration and interface readiness.
+# 8. Verifies PDP IP address assigned by the modem.
+# 9. Confirms that the network interface has an IPv4 address.
+# 10. Performs ping tests to ensure LTE connectivity.
+# 11. Logs results to syslog and terminal.
+# 12. Unblocks the watchdog at the end of the procedure.
 #
 # On failure at any step after modem restart:
 #  - AT+CEER is sent to log the modem error cause for diagnostic purposes.
@@ -178,6 +181,9 @@ atcmd -S 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Ci
 #  - SMART CFUN is always executed with AT+CFUN=1,1; no additional AT commands can be passed with -C.
 #  - Intended to restore LTE connectivity automatically.
 #  - The full procedure may take up to 2 minutes depending on modem registration and WAN restart.
+#  - The SMART CFUN daily limit (15/24h) is enforced by atcmd, but counter reset is not handled internally.
+#    An external process is responsible for resetting the tracking files, since atcmd may not be executed
+#    during the rollover period.
 
 atcmd -C  # Execute SMART CFUN restart procedure
 
