@@ -1,3 +1,4 @@
+# /etc/rc.local
 # Put your custom commands here that should be executed once
 # the system init finished. By default this file does nothing.
 
@@ -12,8 +13,8 @@ logger -t "$logheader" "start process /etc/rc.local"
 
 # Led switch off/restore (restore is currently commented out)
 if [ -x /usr/bin/mdio ]; then
-    logger -t "$logheader" "disabling switch LEDs"
-    mdio mt7530-0 0:0x1f raw 0x21 0x0008
+    #logger -t "$logheader" "disabling switch LEDs" # optional based on your personal tastes
+    #mdio mt7530-0 0:0x1f raw 0x21 0x0008           # optional based on your personal tastes
     #logger -t "$logheader" "restore switch LEDs"
     #mdio mt7530-0 0:0x1f raw 0x21 0x000b
 fi
@@ -21,8 +22,8 @@ fi
 # Create temporary directories
 mkdir -p /tmp/atcmd /tmp/mnt /tmp/boot /tmp/ftp /tmp/watchdog /tmp/qfirehose /tmp/lib/vnstat
 
-# Remove legacy scripts
-rm -f /etc/rc.button/rfkill /etc/rc.button/wps
+# Remove legacy scripts (optional based on your personal tastes)
+#rm -f /etc/rc.button/rfkill /etc/rc.button/wps
 
 # Save environment & boot info
 logger -t "$logheader" "Save environment & boot info first other commands"
@@ -53,11 +54,11 @@ check_ping_with_delay() {
     fi
 }
 
-# wifi off on boot
-wifi down > /dev/null 2>&1 || logger -t "$logheader" "wifi down failed or not available"
+# wifi off on boot (optional based on your personal tastes)
+#wifi down > /dev/null 2>&1 || logger -t "$logheader" "wifi down failed or not available"
 
-# Disable Voice led
-touch /tmp/voice_led_disable
+# Disable Voice led (optional based on your personal tastes)
+#touch /tmp/voice_led_disable
 
 # Remove core dump files (optional, handled by crontab)
 #touch /tmp/clear-core-file
