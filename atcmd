@@ -46,7 +46,7 @@ atcmd_qnwlock_file="" # Temp file for AT+QNWLOCK query output
 atcmd_cereg_file="" # Temp file for AT+CEREG? poll output
 atcmd_cgpaddr_file="" # Temp file for AT+CGPADDR=1 output
 atcmd_cpin_file="" # wait_for_modem_response(): AT+CPIN? output
-atcmd_qcsq_file="" # Temp file for AT+QCSQ signal quality output
+atcmd_qeng_file="" # Temp file for AT+QENG="servingcell" output
 atcmd_sanity_file="" # Temp file for AT+CIMI sanity check output
 sanity_check=0 # Set by -Z flag; runs modem sanity check
 watchdog_block_file="/tmp/watchdog/watchdog.block" # Watchdog block file path
@@ -123,7 +123,7 @@ cleanup() {
     [ -n "$atcmd_cgpaddr_file" ] && [ -f "$atcmd_cgpaddr_file" ] && rm -f "$atcmd_cgpaddr_file"
     [ -n "$atcmd_cpin_file" ]    && [ -f "$atcmd_cpin_file" ]    && rm -f "$atcmd_cpin_file"
     [ -n "$atcmd_sanity_file" ]  && [ -f "$atcmd_sanity_file" ]  && rm -f "$atcmd_sanity_file"
-    [ -n "$atcmd_qcsq_file" ]    && [ -f "$atcmd_qcsq_file" ]    && rm -f "$atcmd_qcsq_file"
+    [ -n "$atcmd_qeng_file" ]    && [ -f "$atcmd_qeng_file" ]    && rm -f "$atcmd_qeng_file"
 
     # Remove watchdog block file only if created by this script
     [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file"
@@ -547,16 +547,28 @@ check_lte_connection() {
         if grep -qE "\+CEREG: [0-9],(1|5)" "$atcmd_cereg_file"; then
             log "Modem registered on LTE network."
             creg_ok=1
-            # Signal quality check
-            log "Checking signal quality (AT+QCSQ)..."
-            atcmd_qcsq_file=$(mktemp) || { log "check_lte_connection: mktemp failed (qcsq)"; }
-            send_at "AT+QCSQ" "$delaytime" "$atcmd_qcsq_file" || true
-            qcsq_raw=$(grep -oE '\+QCSQ: [^\r]+' "$atcmd_qcsq_file" | head -n 1)
-            if [ -n "$qcsq_raw" ]; then
-                echo "$(date '+%Y-%m-%d %H:%M:%S') $qcsq_raw" > /tmp/watchdog/last_qcsq
-                log "QCSQ saved: $qcsq_raw"
+
+            # Signal to external test scripts that modem is registered
+            # and ping test is about to start.
+            touch /tmp/watchdog/atcmd_ping_ready
+            log "atcmd_ping_ready: created (/tmp/watchdog/atcmd_ping_ready)"
+
+            # Cell and signal quality snapshot.
+            # AT+QENG="servingcell" captures cell ID, PCI, EARFCN, band,
+            # RSRP, RSRQ, SINR in a single command - superset of AT+QCSQ.
+            # Result is saved to /tmp/watchdog/last_qeng for external inspection
+            # and logged to syslog.
+            log "Checking cell and signal quality (AT+QENG=\"servingcell\")..."
+            atcmd_qeng_file=$(mktemp) || { log "check_lte_connection: mktemp failed (qeng)"; }
+            send_at 'AT+QENG="servingcell"' "$delaytime" "$atcmd_qeng_file" || true
+            qeng_raw=$(grep -oE '\+QENG: [^\r]+' "$atcmd_qeng_file" | head -n 1)
+            if [ -n "$qeng_raw" ]; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') $qeng_raw" > /tmp/watchdog/last_qeng
+                log "QENG saved: $qeng_raw"
             fi
-            rm -f "$atcmd_qcsq_file"
+            rm -f "$atcmd_qeng_file"
+            atcmd_qeng_file=""
+
             break
         fi
         log "Waiting for network registration... ($i/15)"
@@ -634,6 +646,10 @@ check_lte_connection() {
             success=1
         fi
     done
+
+    # Remove atcmd_ping_ready file
+    rm -f /tmp/watchdog/atcmd_ping_ready
+    log "atcmd_ping_ready: removed (/tmp/watchdog/atcmd_ping_ready)"
 
     if [ $success -eq 1 ]; then
         log "At least one ping succeeded, LTE connectivity OK."
