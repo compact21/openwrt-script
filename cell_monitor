@@ -24,6 +24,10 @@ ping_count=8           # number of ping packets to send before AT+QCAINFO
 atcmd_block_file="/tmp/watchdog/atcmd_block"
 watchdog_block_file="/tmp/watchdog/watchdog.block"
 
+# Boot inhibit -- cron execution guard
+BOOT_INHIBIT_SEC=900   # skip cron runs if system uptime is below this value (seconds)
+                       # has no effect when run interactively from a terminal
+
 # CSV rotation limits
 CSV_MAX_BYTES=1048576  # rotate if file exceeds this size in bytes (1MB)
 CSV_MAX_LINES=1000     # rotate if file exceeds this number of lines
@@ -280,6 +284,19 @@ if [ -f "$watchdog_block_file" ]; then
     exit 0
 fi
 
+# Skip execution if system uptime is below BOOT_INHIBIT_SEC.
+# Prevents cron from running during the boot stabilization window
+# (modem registration, CA negotiation, routing convergence).
+# Has no effect when run interactively from a terminal.
+if [ "$is_cron" -eq 1 ]; then
+    uptime_raw=$(awk '{print $1}' /proc/uptime 2>/dev/null)
+    uptime_sec=${uptime_raw%.*}
+    if [ -n "$uptime_sec" ] && [ "$uptime_sec" -lt "$BOOT_INHIBIT_SEC" ]; then
+        log "init: uptime ${uptime_sec}s < ${BOOT_INHIBIT_SEC}s boot inhibit, skipping"
+        exit 0
+    fi
+fi
+
 # Validate CSV directory if --csv was specified
 if [ -n "$csv_file" ]; then
     csv_dir=$(dirname "$csv_file")
@@ -290,8 +307,6 @@ if [ -n "$csv_file" ]; then
     fi
 fi
 
-# Check modem network registration via AT+CEREG?
-# stat=1: registered home, stat=5: roaming -- anything else: skip
 # Check modem network registration via AT+CEREG?
 # If not registered (status != 1 or 5) skip entirely -- data would be meaningless:
 #   AT+QENG would show SEARCH state, AT+QCAINFO would be empty,
@@ -444,8 +459,10 @@ get_pdp_info() {
     g_pdp_addr="" g_wwan0_addr=""
 
     # AT+CGPADDR: PDP context IP address from modem side
+    # Response may include multiple contexts -- take the first one with a valid IP.
+    # Format: +CGPADDR: <cid>,"<ip>"  (empty string "" means context not active)
     pdp_at_response=$(at_send 'AT+CGPADDR' "$AT_DELAY_STD")
-    g_pdp_addr=$(echo "$pdp_at_response" | grep '+CGPADDR:' | awk -F'"' '{print $2}')
+    g_pdp_addr=$(echo "$pdp_at_response" | grep '+CGPADDR:' | awk -F'"' '$2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $2; exit}')
 
     # wwan0 IPv4 address from OS side
     g_wwan0_addr=$(ip addr show wwan0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
