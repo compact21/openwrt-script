@@ -40,6 +40,7 @@ script_name=$(basename "$0")
 
 # Detect whether running interactively or from cron / non-interactive context.
 # -t 1 checks if stdout is connected to a terminal (tty) -- POSIX compliant.
+# SSH-based detection (SSH_TTY etc.) is unreliable and not used here.
 if [ -t 1 ]; then
     is_cron=0
 else
@@ -199,6 +200,7 @@ bts_lookup() {
         /^\s*earfcn/  { next }
         /^\s*$/       { next }
         $1==e && $2==p {
+            # Trim leading/trailing whitespace from location
             gsub(/^[ \t]+|[ \t]+$/, "", $4)
             print $4
             exit
@@ -258,6 +260,7 @@ csv_write() {
 
     if [ ! -f "$file" ]; then
         echo "$header" > "$file" || { log "csv_write: cannot create $file"; return 1; }
+        [ "$verbose" -eq 1 ] && echo "csv_write: created $file with header"
     fi
 
     echo "$datarow" >> "$file" || { log "csv_write: cannot write to $file"; return 1; }
@@ -277,6 +280,7 @@ if [ -f "$watchdog_block_file" ]; then
     exit 0
 fi
 
+# Validate CSV directory if --csv was specified
 if [ -n "$csv_file" ]; then
     csv_dir=$(dirname "$csv_file")
     if [ ! -d "$csv_dir" ]; then
@@ -354,6 +358,7 @@ get_signal_info() {
     qeng=$(echo "$raw" | grep '+QENG: "servingcell"' | head -1)
 
     # status and RAT are quote-delimited fields
+    # status and RAT are quote-delimited fields
     g_status=$(echo "$qeng" | awk -F'"' '{print $4}')
     g_rat=$(echo    "$qeng" | awk -F'"' '{print $6}')
 
@@ -370,7 +375,12 @@ get_signal_info() {
     g_rssi=$(echo   "$qeng" | awk -F',' '{print $16}')
     g_sinr=$(echo   "$qeng" | awk -F',' '{print $17}' | tr -d '\r ')
 
-    # eNodeB ID: zero-pad CID to 7 hex chars, take first 5, convert to decimal
+    # Compute eNodeB ID: zero-pad CID to 7 hex chars, take first 5, convert to decimal
+    # ECI (E-UTRAN Cell Identity) is 28-bit hex (7 chars):
+    #   first 5 hex chars = eNB ID (20 bits) -> convert to decimal
+    #   last  2 hex chars = sector ID (8 bits)
+    # Zero-pad to 7 chars before splitting (some operators send fewer chars).
+    # Reference: 3GPP TS 36.413
     g_mccmnc="${mcc}${mnc}"
     if echo "$g_cid" | grep -qiE '^[0-9A-Fa-f]+$'; then
         cellid_padded=$(printf "%07s" "$g_cid" | tr ' ' '0')
@@ -385,6 +395,8 @@ get_signal_info() {
         log "Cell: https://lteitaly.it/it/internal/map.php#bts=${g_mccmnc}.${g_enb_id}"
 
         if [ -n "$BTS_CSV" ] && [ -f "$BTS_CSV" ]; then
+            # BTS lookup: log location+band on a dedicated line after the Cell URL
+            # Only runs if BTS_CSV exists -- silent if file absent (standard output)
             pcc_location=$(bts_lookup "$g_earfcn" "$g_pci")
             if [ -n "$pcc_location" ]; then
                 log "Location: ${pcc_location}"
@@ -431,9 +443,11 @@ get_pdp_info() {
 
     g_pdp_addr="" g_wwan0_addr=""
 
+    # AT+CGPADDR: PDP context IP address from modem side
     pdp_at_response=$(at_send 'AT+CGPADDR' "$AT_DELAY_STD")
     g_pdp_addr=$(echo "$pdp_at_response" | grep '+CGPADDR:' | awk -F'"' '{print $2}')
 
+    # wwan0 IPv4 address from OS side
     g_wwan0_addr=$(ip addr show wwan0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
 
     if [ -z "$g_pdp_addr" ] && [ -z "$g_wwan0_addr" ]; then
@@ -548,6 +562,7 @@ EOF
 # Data arrives as async URC after OK -- AT_DELAY_URC (3s) is required.
 #
 # Uses here-doc loop to avoid subshell -- required for global assignment.
+# Logs: compact sensor string + maximum value with sensor name
 # Populates globals: g_temp_max (integer degC), g_temp_max_sensor (sensor name)
 get_temperature() {
     local raw sensor_str temp_val temp_name
@@ -562,6 +577,7 @@ get_temperature() {
         return 1
     fi
 
+    # Build compact sensor string and find maximum -- here-doc avoids subshell
     while IFS= read -r line; do
         temp_name=$(echo "$line" | awk -F'"' '{print $2}')
         temp_val=$(echo  "$line" | awk -F'"' '{print $4}')
