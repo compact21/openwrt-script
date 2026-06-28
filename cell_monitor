@@ -1,6 +1,6 @@
 #!/bin/sh
 # cell_monitor - LTE cell and temperature monitor for OpenWrt
-# Designed for Quectel EG18-EA via AT commands on /dev/ttyUSB2
+# Designed for Quectel EG18-EA via AT commands using /root/bin/atcmd
 #
 # Usage:
 #   cell_monitor                        # silent mode (logger only, designed for cron)
@@ -14,7 +14,6 @@
 # ------------------ CONFIGURATION -----------------------------------
 
 logheader="cell_monitor"
-AT_PORT="/dev/ttyUSB2"
 
 AT_DELAY_STD=1         # wait time for standard AT responses (seconds)
 AT_DELAY_URC=3         # wait time for async URC responses e.g. AT+QTEMP (seconds)
@@ -26,8 +25,8 @@ atcmd_block_file="/tmp/watchdog/atcmd_block"
 watchdog_block_file="/tmp/watchdog/watchdog.block"
 
 # CSV rotation limits
-CSV_MAX_BYTES=1048576 # rotate if file exceeds this size in bytes (1MB)
-CSV_MAX_LINES=1000    # rotate if file exceeds this number of lines
+CSV_MAX_BYTES=1048576  # rotate if file exceeds this size in bytes (1MB)
+CSV_MAX_LINES=1000     # rotate if file exceeds this number of lines
 
 # BTS lookup CSV -- used to resolve EARFCN+PCI to location name
 # Set to empty string to disable lookup entirely
@@ -41,13 +40,19 @@ script_name=$(basename "$0")
 
 # Detect whether running interactively or from cron / non-interactive context.
 # -t 1 checks if stdout is connected to a terminal (tty) -- POSIX compliant.
-# SSH-based detection (SSH_TTY etc.) is unreliable and not used here.
 if [ -t 1 ]; then
     is_cron=0
 else
     is_cron=1
 fi
 
+# ------------------ GLOBAL SCRIPT LOCK ------------------------------
+
+lock_dir="/tmp/lock/cell_monitor.lock"
+if ! mkdir "$lock_dir" 2>/dev/null; then
+    exit 0
+fi
+trap 'rmdir "$lock_dir" 2>/dev/null' EXIT INT TERM
 
 # ------------------ HELP --------------------------------------------
 
@@ -56,7 +61,7 @@ usage() {
 Usage: $script_name [OPTIONS]
 
 LTE signal and temperature monitor for Quectel EG18-EA on OpenWrt.
-Reads AT+QENG, AT+QCAINFO and AT+QTEMP, logs results via logger.
+Reads AT+QENG, AT+QCAINFO and AT+QTEMP via /root/bin/atcmd, logs results via logger.
 
 Options:
   -v, --verbose          print output to terminal in addition to logger
@@ -107,8 +112,6 @@ Block files respected:
 
 BTS lookup CSV: ${BTS_CSV:-disabled}
 
-AT port: $AT_PORT
-
 Examples:
   $script_name -v
   $script_name --csv /tmp/modem.csv
@@ -154,34 +157,23 @@ log() {
     [ "$verbose" -eq 1 ] && echo "$msg"
 }
 
-# Send an AT command via picocom and return the response on stdout.
-# Uses the same approach as atcmd to ensure correct port handling
-# (baud rate, flow control, line discipline).
+# Send an AT command via atcmd and return the response on stdout.
+# Respects atcmd lock file: if lock is active, logs and exits.
 #
 # $1: AT command string
 # $2: seconds to wait for response (default: AT_DELAY_STD)
-#     converted to milliseconds for picocom --exit-after
-#
-# picocom flags:
-#   --exit-after N  : exit after N milliseconds of inactivity
-#   --quiet         : suppress connection/disconnection messages
-#   -t <string>     : send string after opening port
-#   --logfile <file>: write all received data to file
+#     converted to milliseconds for atcmd -d
 at_send() {
     local cmd="$1"
-    local wait="${2:-$AT_DELAY_STD}"
-    local tmpfile atstring delay_ms
+    local delay="${2:-$AT_DELAY_STD}"
+    local delay_ms=$((delay * 1000))
 
-    tmpfile=$(mktemp)
-    delay_ms=$((wait * 1000))
-    atstring=$(printf "%s\r\n" "$cmd")
+    if [ -f /tmp/lock/atcmd.lock ]; then
+        log "at_send: atcmd lock active, aborting"
+        exit 0
+    fi
 
-    picocom "$AT_PORT" --nolock --exit-after "$delay_ms" --quiet -t "$atstring" --logfile "$tmpfile" >/dev/null 2>&1
-
-    # Skip first line (picocom port open header) and filter empty lines
-    tail -n +2 "$tmpfile" | grep -E '[^[:space:]]'
-
-    rm -f "$tmpfile"
+    /root/bin/atcmd -a "$cmd" -d "$delay_ms" -n
 }
 
 # ------------------ BTS LOOKUP --------------------------------------
@@ -207,7 +199,6 @@ bts_lookup() {
         /^\s*earfcn/  { next }
         /^\s*$/       { next }
         $1==e && $2==p {
-            # Trim leading/trailing whitespace from location
             gsub(/^[ \t]+|[ \t]+$/, "", $4)
             print $4
             exit
@@ -267,35 +258,12 @@ csv_write() {
 
     if [ ! -f "$file" ]; then
         echo "$header" > "$file" || { log "csv_write: cannot create $file"; return 1; }
-        [ "$verbose" -eq 1 ] && echo "csv_write: created $file with header"
     fi
 
     echo "$datarow" >> "$file" || { log "csv_write: cannot write to $file"; return 1; }
 }
 
 # ------------------ PRELIMINARY CHECKS -----------------------------
-
-# Not compatible with ModemManager (takes exclusive modem control)
-lteproto=$(grep -c "proto 'modemmanager'" /etc/config/network 2>/dev/null || true)
-if [ "$lteproto" -ne 0 ]; then
-    logger -t "$logheader" "init: script not compatible with ModemManager"
-    echo "Error: script not compatible with ModemManager"
-    exit 3
-fi
-
-# Check picocom is installed -- required for AT command communication
-if ! command -v picocom >/dev/null 2>&1; then
-    logger -t "$logheader" "init: picocom not found, exiting"
-    echo "Error: picocom is not installed (opkg install picocom)"
-    exit 1
-fi
-
-# AT serial port must exist and be a character device
-if [ ! -c "$AT_PORT" ]; then
-    logger -t "$logheader" "init: AT port $AT_PORT not found, exiting"
-    echo "Error: AT port $AT_PORT not found"
-    exit 1
-fi
 
 # Respect the watchdog recovery block file -- set by watchdog_mbim during safe_ifup
 if [ -f "$atcmd_block_file" ]; then
@@ -309,7 +277,6 @@ if [ -f "$watchdog_block_file" ]; then
     exit 0
 fi
 
-# Validate CSV directory if --csv was specified
 if [ -n "$csv_file" ]; then
     csv_dir=$(dirname "$csv_file")
     if [ ! -d "$csv_dir" ]; then
@@ -319,6 +286,8 @@ if [ -n "$csv_file" ]; then
     fi
 fi
 
+# Check modem network registration via AT+CEREG?
+# stat=1: registered home, stat=5: roaming -- anything else: skip
 # Check modem network registration via AT+CEREG?
 # If not registered (status != 1 or 5) skip entirely -- data would be meaningless:
 #   AT+QENG would show SEARCH state, AT+QCAINFO would be empty,
@@ -341,6 +310,16 @@ fi
 # ------------------ GET_SIGNAL_INFO ---------------------------------
 
 # Read AT+QENG="servingcell" and log RF parameters.
+#
+# AT+QENG field positions (comma-split, 1-based):
+#   MCC=5, MNC=6, CID=7, PCI=8, EARFCN=9, Band=10,
+#   TAC=13, RSRP=14, RSRQ=15, RSSI=16, SINR=17
+#   status=$4 and RAT=$6 extracted via awk -F'"' (quote-delimited)
+#
+# Populates globals:
+#   g_status g_rat g_band g_earfcn g_pci g_cid g_tac
+#   g_enb_id g_mccmnc g_rsrp g_rsrq g_rssi g_sinr
+# Read AT+QENG="servingcell" and log RF parameters.
 # Handles both CONNECT and NOCONN states.
 #
 # eNodeB ID computation for lteitaly.it:
@@ -353,7 +332,7 @@ fi
 # AT+QENG field positions (comma-split, 1-based):
 #   MCC=5, MNC=6, CID=7, PCI=8, EARFCN=9, Band=10,
 #   TAC=13, RSRP=14, RSRQ=15, RSSI=16, SINR=17
-#   status and RAT extracted via awk -F'"' (quote-delimited)
+#   status=$4 and RAT=$6 extracted via awk -F'"' (quote-delimited)
 #
 # Populates globals:
 #   g_status g_rat g_band g_earfcn g_pci g_cid g_tac
@@ -374,8 +353,11 @@ get_signal_info() {
 
     qeng=$(echo "$raw" | grep '+QENG: "servingcell"' | head -1)
 
+    # status and RAT are quote-delimited fields
     g_status=$(echo "$qeng" | awk -F'"' '{print $4}')
     g_rat=$(echo    "$qeng" | awk -F'"' '{print $6}')
+
+    # remaining fields are comma-delimited
     mcc=$(echo      "$qeng" | awk -F',' '{print $5}')
     mnc=$(echo      "$qeng" | awk -F',' '{print $6}')
     g_cid=$(echo    "$qeng" | awk -F',' '{print $7}')
@@ -388,7 +370,7 @@ get_signal_info() {
     g_rssi=$(echo   "$qeng" | awk -F',' '{print $16}')
     g_sinr=$(echo   "$qeng" | awk -F',' '{print $17}' | tr -d '\r ')
 
-    # Compute eNodeB ID: zero-pad CID to 7 hex chars, take first 5, convert to decimal
+    # eNodeB ID: zero-pad CID to 7 hex chars, take first 5, convert to decimal
     g_mccmnc="${mcc}${mnc}"
     if echo "$g_cid" | grep -qiE '^[0-9A-Fa-f]+$'; then
         cellid_padded=$(printf "%07s" "$g_cid" | tr ' ' '0')
@@ -402,8 +384,6 @@ get_signal_info() {
     if [ -n "$g_enb_id" ]; then
         log "Cell: https://lteitaly.it/it/internal/map.php#bts=${g_mccmnc}.${g_enb_id}"
 
-        # BTS lookup: log location+band on a dedicated line after the Cell URL
-        # Only runs if BTS_CSV exists -- silent if file absent (standard output)
         if [ -n "$BTS_CSV" ] && [ -f "$BTS_CSV" ]; then
             pcc_location=$(bts_lookup "$g_earfcn" "$g_pci")
             if [ -n "$pcc_location" ]; then
@@ -447,15 +427,13 @@ get_wan_uptime() {
 # Logs both values and whether they are coherent.
 # Populates globals: g_pdp_addr, g_wwan0_addr
 get_pdp_info() {
-    local pdp_at_response wwan_addr
+    local pdp_at_response
 
     g_pdp_addr="" g_wwan0_addr=""
 
-    # AT+CGPADDR: PDP context IP address from modem side
     pdp_at_response=$(at_send 'AT+CGPADDR' "$AT_DELAY_STD")
     g_pdp_addr=$(echo "$pdp_at_response" | grep '+CGPADDR:' | awk -F'"' '{print $2}')
 
-    # wwan0 IPv4 address from OS side
     g_wwan0_addr=$(ip addr show wwan0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
 
     if [ -z "$g_pdp_addr" ] && [ -z "$g_wwan0_addr" ]; then
@@ -473,28 +451,6 @@ get_pdp_info() {
 
 # ------------------ GET_CA_INFO -------------------------------------
 
-# Read AT+QCAINFO -- dedicated Carrier Aggregation status command.
-# More reliable than parsing SCC rows from AT+QENG (fixed output format).
-#
-# Expected output:
-#   +QCAINFO: "pcc",100,100,"LTE BAND 1",1,65,-112,-12,-82,12
-#   +QCAINFO: "scc",1650,100,"LTE BAND 3",1,65,-102,-11,-80,8
-#   +QCAINFO: "scc",6200,50,"LTE BAND 20",1,80,-97,-14,-74,0
-# Fields: type, EARFCN, bandwidth_code, band_str, pcell_state/scell_state, PCI, RSRP, RSRQ, RSSI, SINR
-#
-# CA activation timing (ping already started in background by main):
-#   t=0s  ping -c 8 & started in main
-#   t=0s  sleep 2 in main
-#   t=2s  AT+QENG runs (~1s) -- 3 packets send
-#   t=3s  sleep 2 in main
-#   t=5s  AT+QCAINFO runs -- 6 ping packets already sent, CA should be active
-#
-# Logs all rows via log(). Populates global g_ca_rows (newline-separated):
-#   each line: type,band,earfcn,pci,rsrp,rsrq,rssi,sinr
-#
-# Note: logging loop runs in a subshell (pipe) -- cannot modify globals.
-# g_ca_rows is built by re-parsing raw output in a here-doc loop (no subshell).
-
 # Convert AT+QCAINFO bandwidth code to MHz
 # Codes: 6=1.4  15=3  25=5  50=10  75=15  100=20 MHz
 bw_to_mhz() {
@@ -509,6 +465,27 @@ bw_to_mhz() {
     esac
 }
 
+# Read AT+QCAINFO -- dedicated Carrier Aggregation status command.
+# More reliable than parsing SCC rows from AT+QENG (fixed output format).
+#
+# Expected output:
+#   +QCAINFO: "pcc",100,100,"LTE BAND 1",1,65,-112,-12,-82,12
+#   +QCAINFO: "scc",1650,100,"LTE BAND 3",1,65,-102,-11,-80,8
+#   +QCAINFO: "scc",6200,50,"LTE BAND 20",1,80,-97,-14,-74,0
+# Fields: type, EARFCN, bandwidth_code, band_str, pcell_state/scell_state, PCI, RSRP, RSRQ, RSSI, SINR
+#
+# CA activation timing (ping already started in background by main):
+#   t=0s  ping -c 8 & started in main
+#   t=0s  sleep 2 in main
+#   t=2s  AT+QENG runs (~1s) -- 3 packets sent
+#   t=3s  sleep 2 in main
+#   t=5s  AT+QCAINFO runs -- 6 ping packets already sent, CA should be active
+#
+# Logs all rows via log(). Populates global g_ca_rows (newline-separated):
+#   each line: type,band,earfcn,pci,rsrp,rsrq,rssi,sinr
+#
+# Note: logging loop runs in a subshell (pipe) -- cannot modify globals.
+# g_ca_rows is built by re-parsing raw output in a here-doc loop (no subshell).
 get_ca_info() {
     local raw line
 
@@ -521,9 +498,9 @@ get_ca_info() {
         return 0
     fi
 
-    # Log all component carriers (runs in subshell -- cannot set globals)
+    # Logging loop (subshell via pipe -- cannot set globals, logging only)
     echo "$raw" | grep '+QCAINFO:' | while IFS= read -r line; do
-        local type earfcn bw band pci rsrp rsrq rssi sinr
+        local type earfcn bw band pci rsrp rsrq rssi sinr bw_mhz
         type=$(echo   "$line" | awk -F'"' '{print $2}')
         earfcn=$(echo "$line" | awk -F',' '{print $2}')
         bw=$(echo     "$line" | awk -F',' '{print $3}')
@@ -537,7 +514,7 @@ get_ca_info() {
         log "CA ${type}: Band=${band} EARFCN=${earfcn} BW=${bw_mhz}MHz PCI=${pci} RSRP=${rsrp}dBm RSRQ=${rsrq}dB RSSI=${rssi}dBm SINR=${sinr}dB"
     done
 
-    # Re-parse outside subshell via here-doc to populate g_ca_rows for CSV
+    # Re-parse via here-doc (no subshell) to populate g_ca_rows for CSV
     while IFS= read -r line; do
         local type earfcn band pci rsrp rsrq rssi sinr
         type=$(echo   "$line" | awk -F'"' '{print $2}')
@@ -570,7 +547,7 @@ EOF
 # Temperature values are quoted strings: +QTEMP: "sensor_name","value"
 # Data arrives as async URC after OK -- AT_DELAY_URC (3s) is required.
 #
-# Logs: compact sensor string + maximum value with sensor name
+# Uses here-doc loop to avoid subshell -- required for global assignment.
 # Populates globals: g_temp_max (integer degC), g_temp_max_sensor (sensor name)
 get_temperature() {
     local raw sensor_str temp_val temp_name
@@ -581,11 +558,10 @@ get_temperature() {
     raw=$(at_send 'AT+QTEMP' "$AT_DELAY_URC")
 
     if ! echo "$raw" | grep -q '+QTEMP:'; then
-        log "get_temperature: no data received (URC may have been missed)"
+        log "get_temperature: no data received"
         return 1
     fi
 
-    # Build compact sensor string and find maximum -- here-doc avoids subshell
     while IFS= read -r line; do
         temp_name=$(echo "$line" | awk -F'"' '{print $2}')
         temp_val=$(echo  "$line" | awk -F'"' '{print $4}')
@@ -615,6 +591,9 @@ EOF
 [ "$verbose" -eq 1 ] && [ "$is_cron" -eq 0 ] && echo "Running interactively (tty detected)"
 [ "$verbose" -eq 1 ] && [ "$is_cron" -eq 1 ] && echo "Running non-interactively (no tty)"
 
+ping -c "$ping_count" -W 2 "$ping_target" >/dev/null 2>&1 &
+ping_pid=$!
+
 # Start ping in background to activate CA -- done here so traffic is already
 # flowing when get_signal_info and get_ca_info run.
 # Timing sequence:
@@ -624,16 +603,13 @@ EOF
 #   t=3s  sleep 2
 #   t=5s  get_ca_info -> AT+QCAINFO (~1s) -- 6 packets sent
 #   t=6s  get_wan_uptime + get_temperature (ping still running, no longer needed)
-ping -c "$ping_count" -W 2 "$ping_target" >/dev/null 2>&1 &
-ping_pid=$!
-
 sleep 2
 
 get_signal_info
 
-# Sleep 2 between AT+QENG and AT+QCAINFO to allow ping traffic to activate CA
-# At this point ~3 ping packets have been sent (2s initial sleep + ~1s AT+QENG)
-# After this sleep ~5 packets will have been sent before AT+QCAINFO runs
+# Sleep 2 between AT+QENG and AT+QCAINFO to allow ping traffic to activate CA.
+# At this point ~3 ping packets have been sent (2s initial sleep + ~1s AT+QENG).
+# After this sleep ~5 packets will have been sent before AT+QCAINFO runs.
 sleep 2
 
 get_ca_info
@@ -641,9 +617,10 @@ get_wan_uptime
 get_pdp_info
 get_temperature
 
-# Ensure ping background process is terminated before exiting
 kill "$ping_pid" 2>/dev/null
 wait "$ping_pid" 2>/dev/null
+
+# ------------------ CSV WRITE ---------------------------------------
 
 # Write CSV rows if --csv was specified.
 # One row per component carrier (pcc + each scc).
@@ -653,7 +630,6 @@ wait "$ping_pid" 2>/dev/null
 # Note: PDP address coherence check (AT+CGPADDR vs wwan0) is logged
 # to syslog only via get_pdp_info -- not included in CSV columns.
 # Search for "MISMATCH" in syslog to identify PDP degradation events.
-#
 if [ -n "$csv_file" ]; then
     ts=$(date '+%Y-%m-%dT%H:%M:%S')
 
@@ -682,4 +658,3 @@ if [ -n "$csv_file" ]; then
         csv_write "$csv_file" "${ts},pcc,${g_status},${g_rat},${g_band},${g_earfcn},${g_pci},${g_cid},${g_tac},${g_enb_id},${g_rsrp},${g_rsrq},${g_rssi},${g_sinr},${g_wan_uptime},${g_temp_max}"
     fi
 fi
-
