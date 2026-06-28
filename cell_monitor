@@ -169,7 +169,7 @@ at_send() {
     local delay="${2:-$AT_DELAY_STD}"
     local delay_ms=$((delay * 1000))
 
-    if [ -f /tmp/lock/atcmd.lock ]; then
+    if [ -d /tmp/lock/atcmd.lock ]; then
         log "at_send: atcmd lock active, aborting"
         exit 0
     fi
