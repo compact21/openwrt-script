@@ -616,7 +616,7 @@ check_lte_connection() {
                 log "check_lte_connection: mktemp failed (qeng), skipping signal quality check"
             else
                 send_at 'AT+QENG="servingcell"' "$delaytime" "$atcmd_qeng_file" || true
-                qeng_raw=$(grep -oE '\+QENG: [^\r]+' "$atcmd_qeng_file" | head -n 1)
+                qeng_raw=$(tr -d '\r' < "$atcmd_qeng_file" | grep -oE '\+QENG:.*' | head -n 1)
                 if [ -n "$qeng_raw" ]; then
                     echo "$(date '+%Y-%m-%d %H:%M:%S') $qeng_raw" > /tmp/watchdog/last_qeng
                     log "QENG saved: $qeng_raw"
