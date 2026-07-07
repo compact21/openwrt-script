@@ -44,7 +44,7 @@ savefile="" # Optional output file path set by -o flag
 atcmd_sendfile="" # Temp file for picocom output in send_at()
 atcmd_qnwlock_file="" # Temp file for AT+QNWLOCK query output
 atcmd_cereg_file="" # Temp file for AT+CEREG? poll output
-atcmd_cgpaddr_file="" # Temp file for AT+CGPADDR=1 output
+atcmd_cgpaddr_file="" # Temp file for AT+CGPADDR output
 atcmd_cpin_file="" # wait_for_modem_response(): AT+CPIN? output
 atcmd_qeng_file="" # Temp file for AT+QENG="servingcell" output
 atcmd_sanity_file="" # Temp file for AT+CIMI sanity check output
@@ -110,6 +110,35 @@ get_uptime_sec() {
     [ -n "$up" ] && echo "$up"
 }
 
+# Validate the AT command before sending it to the modem.
+# Only printable ASCII characters are accepted. This prevents accidental
+# use of smart quotes, Unicode dashes and other non-ASCII characters
+# commonly introduced when copying commands from documents or web pages.
+# Returns 0 if valid, 1 otherwise.
+sanitize_at_command() {
+    local cmd="$1"
+
+    # Reject empty command.
+    [ -z "$cmd" ] && {
+        echo "ERROR: empty AT command." >&2
+        return 1
+    }
+
+    # Reject control characters.
+    if printf '%s' "$cmd" | LC_ALL=C grep -q '[[:cntrl:]]' >/dev/null; then
+        echo "ERROR: AT command contains control characters." >&2
+        return 1
+    fi
+
+    # Reject non-ASCII characters.
+    if ! printf '%s' "$cmd" | LC_ALL=C grep -q '^[ -~]*$'; then
+        echo "ERROR: AT command contains non-ASCII characters." >&2
+        return 1
+    fi
+
+    return 0
+}
+
 # Cleanup function
 # shellcheck disable=SC2329
 cleanup() {
@@ -135,7 +164,7 @@ cleanup() {
 # Signals handled: EXIT (normal exit), INT (Ctrl+C), TERM (termination)
 trap 'cleanup' EXIT INT TERM
 
-# Save the original command for eventual logging
+# Save the original command for eventual logging or debug
 orig_command="$0"
 for arg in "$@"; do
     orig_command="$orig_command '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
@@ -179,7 +208,8 @@ while [ $# -gt 0 ]; do
             smart_cfun=1
             ;;
         --internal-watchdog)
-            if [ "$PPID" -eq "$(cat /var/run/watchdog_mbim.pid 2>/dev/null)" ]; then
+            watchdog_mbim_pid=$(cat /var/run/watchdog_mbim.pid 2>/dev/null)
+            if [ -n "$watchdog_mbim_pid" ] && [ "$PPID" -eq "$watchdog_mbim_pid" ] 2>/dev/null; then
                 internal_watchdog=1
             else
                 echo "ERROR: --internal-watchdog reserved"
@@ -213,6 +243,18 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# -S, -C and -Z are mutually exclusive: only one smart mode can run per invocation.
+smart_flags_count=$((smart_qnwlock + smart_cfun + sanity_check))
+if [ "$smart_flags_count" -gt 1 ]; then
+    echo "ERROR: -S/--smart-qnwlock, -C/--smart-cfun and -Z/--sanity-check are mutually exclusive. Use only one per invocation."
+    exit 1
+fi
+
+# Satitize_at_command
+if [ -n "$atcommand" ]; then
+    sanitize_at_command "$atcommand" || exit 1
+fi
 
 # Check if picocom is installed
 if ! command -v picocom > /dev/null; then
@@ -511,9 +553,19 @@ check_modem_sanity() {
 # Restart modem
 restart_modem() {
     log "Restarting modem..."
+
+    if ! count_cfun_op; then
+        log "ERROR: daily CFUN limit reached, aborting modem restart"
+        return 1
+    fi
     log "Send: \"AT+CFUN=0\" (Radio OFF)..."
     send_at "AT+CFUN=0" || true
     sleep 3
+
+    if ! count_cfun_op; then
+        log "ERROR: daily CFUN limit reached, modem left in CFUN=0 (radio OFF)"
+        return 1
+    fi
     log "Send: \"AT+CFUN=1\" (Radio ON)..."
     send_at "AT+CFUN=1" || true
     sleep 3
@@ -559,15 +611,19 @@ check_lte_connection() {
             # Result is saved to /tmp/watchdog/last_qeng for external inspection
             # and logged to syslog.
             log "Checking cell and signal quality (AT+QENG=\"servingcell\")..."
-            atcmd_qeng_file=$(mktemp) || { log "check_lte_connection: mktemp failed (qeng)"; }
-            send_at 'AT+QENG="servingcell"' "$delaytime" "$atcmd_qeng_file" || true
-            qeng_raw=$(grep -oE '\+QENG: [^\r]+' "$atcmd_qeng_file" | head -n 1)
-            if [ -n "$qeng_raw" ]; then
-                echo "$(date '+%Y-%m-%d %H:%M:%S') $qeng_raw" > /tmp/watchdog/last_qeng
-                log "QENG saved: $qeng_raw"
+            atcmd_qeng_file=$(mktemp)
+            if [ -z "$atcmd_qeng_file" ]; then
+                log "check_lte_connection: mktemp failed (qeng), skipping signal quality check"
+            else
+                send_at 'AT+QENG="servingcell"' "$delaytime" "$atcmd_qeng_file" || true
+                qeng_raw=$(grep -oE '\+QENG: [^\r]+' "$atcmd_qeng_file" | head -n 1)
+                if [ -n "$qeng_raw" ]; then
+                    echo "$(date '+%Y-%m-%d %H:%M:%S') $qeng_raw" > /tmp/watchdog/last_qeng
+                    log "QENG saved: $qeng_raw"
+                fi
+                rm -f "$atcmd_qeng_file"
+                atcmd_qeng_file=""
             fi
-            rm -f "$atcmd_qeng_file"
-            atcmd_qeng_file=""
 
             break
         fi
@@ -600,8 +656,11 @@ check_lte_connection() {
 
     log "Checking PDP IP address..."
     atcmd_cgpaddr_file=$(mktemp) || { log "check_lte_connection: mktemp failed (cgpaddr)"; return 1; }
-    send_at "AT+CGPADDR=1" "$delaytime" "$atcmd_cgpaddr_file"
-    pdp_ip=$(grep -oE '\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\b' "$atcmd_cgpaddr_file")
+    # Query all PDP contexts and take the first one with a valid IPv4 address.
+    # Using AT+CGPADDR (without index) handles multiple contexts correctly --
+    # context 1 may be empty (IMS/VoLTE bearer) while the data bearer is on CID 2+.
+    send_at "AT+CGPADDR" "$delaytime" "$atcmd_cgpaddr_file"
+    pdp_ip=$(grep -oE '\b[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\b' "$atcmd_cgpaddr_file" | head -n 1)
     rm -f "$atcmd_cgpaddr_file"
     atcmd_cgpaddr_file=""
     if [ -z "$pdp_ip" ]; then
@@ -660,10 +719,9 @@ check_lte_connection() {
     fi
 }
 
-# Check and enforce daily CFUN invocation limit (uptime-based, immune to NTP).
-# Returns 0 if invocation is allowed, 1 if daily limit reached.
-check_cfun_limit() {
-    # Load counter
+# Read the current CFUN counter/window, resetting the window if 86400s elapsed.
+# Populates atcmd_cfun_count and atcmd_cfun_window_start. Uptime-based, immune to NTP.
+load_cfun_state() {
     atcmd_cfun_count=0
     if [ -r "$atcmd_cfun_file" ]; then
         read -r atcmd_cfun_count < "$atcmd_cfun_file"
@@ -672,7 +730,7 @@ check_cfun_limit() {
         ''|*[!0-9]*) atcmd_cfun_count=0 ;;
     esac
 
-    # Load or init window start
+    # Load counter
     now_up=$(cat /proc/uptime 2>/dev/null | cut -d' ' -f1 | cut -d'.' -f1)
     if [ -r "$atcmd_cfun_window_file" ]; then
         read -r atcmd_cfun_window_start < "$atcmd_cfun_window_file"
@@ -692,23 +750,40 @@ check_cfun_limit() {
 
     # Reset window if 86400s elapsed
     if [ $(( now_up - atcmd_cfun_window_start )) -ge 86400 ]; then
-        log "atcmd -C daily window reset (count was $atcmd_cfun_count)"
+        log "atcmd CFUN daily window reset (count was $atcmd_cfun_count)"
         atcmd_cfun_count=0
         echo "$atcmd_cfun_count" > "$atcmd_cfun_file"
         atcmd_cfun_window_start=$now_up
         echo "$atcmd_cfun_window_start" > "$atcmd_cfun_window_file"
     fi
+}
+
+# Non-incrementing check: is the daily CFUN limit already reached?
+# Used for a cheap fail-fast before touching the AT port at all.
+cfun_limit_reached() {
+    load_cfun_state
+    [ "$atcmd_cfun_count" -ge "$atcmd_cfun_max" ]
+}
+
+# Register one real AT+CFUN operation against the daily counter and enforce
+# the limit. Must be called once for every AT+CFUN command actually sent to
+# the modem (both the -C and -S/QNWLOCK code paths go through restart_modem
+# and smart_restart_procedure, so this is invocation-agnostic).
+# Returns 0 if the operation is allowed (and counts it), 1 if the daily
+# limit has been reached (operation is NOT counted again).
+count_cfun_op() {
+    load_cfun_state
 
     # Check limit
     if [ "$atcmd_cfun_count" -ge "$atcmd_cfun_max" ]; then
-        log "atcmd -C daily limit reached ($atcmd_cfun_count/$atcmd_cfun_max), aborting"
+        log "atcmd CFUN daily limit reached ($atcmd_cfun_count/$atcmd_cfun_max), refusing to send AT+CFUN"
         return 1
     fi
 
     # Increment counter
     atcmd_cfun_count=$(( atcmd_cfun_count + 1 ))
     echo "$atcmd_cfun_count" > "$atcmd_cfun_file"
-    log "atcmd -C invocation $atcmd_cfun_count/$atcmd_cfun_max"
+    log "atcmd CFUN operation $atcmd_cfun_count/$atcmd_cfun_max"
     return 0
 }
 
@@ -718,17 +793,36 @@ smart_restart_procedure() {
     block_watchdog
 
     if [ -n "$2" ]; then
+        case "$2" in
+            AT+CFUN=*)
+                if ! count_cfun_op; then
+                    log "CRITICAL: daily CFUN limit reached before starting $type"
+                    unblock_watchdog
+                    exit 12
+                fi
+                ;;
+        esac
         log "Send: \"$2\"..."
         send_at "$2" || true
     fi
 
-    restart_modem
+    if ! restart_modem; then
+        log "CRITICAL: modem restart aborted (see previous error) during $type"
+        check_ceer_log
+        unblock_watchdog
+        exit 12
+    fi
     restart_wan
 
     if ! check_modem_sanity; then
         log "WARNING: modem sanity check failed after restart - modem may be in zombie state"
         log "Attempting second modem restart..."
-        restart_modem
+        if ! restart_modem; then
+            log "CRITICAL: second modem restart aborted (see previous error) during $type"
+            check_ceer_log
+            unblock_watchdog
+            exit 12
+        fi
         restart_wan
         if ! check_modem_sanity; then
             log "CRITICAL: modem still in zombie state after second restart"
@@ -755,7 +849,12 @@ smart_restart_procedure() {
             send_at 'AT+QNWLOCK="common/4g",0'
         fi
 
-        restart_modem
+        if ! restart_modem; then
+            log "CRITICAL: fallback modem restart aborted (see previous error) during $type"
+            check_ceer_log
+            unblock_watchdog
+            exit 12
+        fi
         restart_wan
 
         if ! check_modem_sanity; then
@@ -794,8 +893,11 @@ if [ "$smart_cfun" -eq 1 ]; then
         usage
         exit 1
     fi
-    # Check daily limit before executing
-    if ! check_cfun_limit; then
+    # Fail fast if the daily limit is already exhausted, before touching the AT port.
+    # (Actual per-operation counting/enforcement happens in restart_modem() and
+    # smart_restart_procedure(), so this also covers the -S/QNWLOCK code path.)
+    if cfun_limit_reached; then
+        log "atcmd -C daily CFUN limit already reached, aborting"
         exit 11  # exit code specifico: limit reached
     fi
     log "Executing SMART CFUN restart procedure..."
