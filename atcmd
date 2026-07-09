@@ -935,10 +935,17 @@ if [ "$smart_qnwlock" -eq 1 ]; then
             if echo "$celllock_status" | grep -qv '^0$'; then
                 log "Cell-locks detected; executing SMART QNWLOCK procedure"
                 smart_restart_procedure "QNWLOCK" "$atcommand"
+                exit 0
             else
-                log "No cell-locks active; smart QNWLOCK execution not necessary. Command execution skipped."
+                # No active cell-lock: nothing to clear, so the QNWLOCK/CFUN
+                # restart procedure is intentionally skipped. This is NOT an
+                # error - exit 13 lets callers (e.g. watchdog_mbim) distinguish
+                # "skipped, no lock present" from a plain success (exit 0) or
+                # failure (exit 12), and fall back to a plain CFUN restart if
+                # a restart is still desired.
+                log "No cell-locks active; smart QNWLOCK execution not necessary. Command execution skipped. (exit 13)"
+                exit 13
             fi
-            exit 0
             ;;
         AT+QNWLOCK=\"common/4g\")
             send_at 'AT+QNWLOCK="common/4g"'
