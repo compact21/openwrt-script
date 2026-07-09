@@ -139,7 +139,6 @@ atcmd 'AT+QNWLOCK="common/4g",1,1650,100'; # Single cell lock without check or f
 # 8. Logs results and unblocks the watchdog.
 #
 # On failure at any step after modem restart:
-#  - AT+CEER is sent to log the modem error cause for diagnostic purposes.
 #  - A fallback procedure is attempted: cell-lock is removed, modem and WAN
 #    are restarted, and connectivity is checked again.
 #  - If connectivity is not restored after fallback, script exits with code 12.
@@ -172,7 +171,6 @@ atcmd -S 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Ci
 # 12. Unblocks the watchdog at the end of the procedure.
 #
 # On failure at any step after modem restart:
-#  - AT+CEER is sent to log the modem error cause for diagnostic purposes.
 #  - A fallback procedure is attempted: modem and WAN are restarted, and
 #    connectivity is checked again.
 #  - If connectivity is not restored after fallback, script exits with code 12.
