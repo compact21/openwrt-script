@@ -7,6 +7,8 @@ logheader="connection_reset"
 atcmd_bin="/root/bin/atcmd"
 usb_device_id="2c7c:0512"          # USB VID:PID of the LTE modem (Quectel EG18-EA)
 mbim_device="/dev/cdc-wdm0"        # MBIM control device
+debug_file="/tmp/watchdog/mbim_debug"
+debug_locked=0                      # 1 if this script created the debug file
 
 # Prevent concurrent execution
 script_lock_file="/tmp/connection_reset.lock"
@@ -25,7 +27,9 @@ logger -t "$logheader" "atcmd_bin=$atcmd_bin usb_device_id=$usb_device_id mbim_d
 cleanup() {
     logger -t "$logheader" "cleanup: invoked"
     rm -f "$script_lock_file"
-    rm -f /tmp/watchdog/mbim_debug
+    # Remove debug file only if created by this script.
+    # Prevents removing a file that was already present before this script ran.
+    [ "$debug_locked" -eq 1 ] && rm -f "$debug_file"
     rm -f /tmp/watchdog/ping_once_force_fail
 }
 trap 'cleanup' EXIT INT TERM
@@ -57,6 +61,20 @@ get_uptime_sec() {
     [ -n "$up" ] && echo "$up"
 }
 
+# Check if watchdog_mbim is currently running.
+# If not running, prints an error message, logs the aborted option, and returns 1.
+# Usage: check_watchdog_running "option label"
+check_watchdog_running() {
+    if ! pidof watchdog_mbim >/dev/null 2>&1; then
+        echo "ERROR: watchdog_mbim is not running."
+        echo "This operation requires the watchdog to be active to restore the connection."
+        echo "Start it with: service watchdog_mbim start"
+        logger -t "$logheader" "Aborted: watchdog_mbim not running ($1)"
+        return 1
+    fi
+    return 0
+}
+
 # Option 1: Detach LTE connection (AT+CGATT=0)
 # Drops the PS data connection without restarting the modem.
 # The modem stays registered on the radio network.
@@ -64,6 +82,11 @@ get_uptime_sec() {
 do_cgatt_detach() {
         echo "--- AT+CGATT=0 (PS detach) ---"
         echo "This drops the data connection. The watchdog will intervene to restore it."
+
+        if ! check_watchdog_running "option 1"; then
+                return 1
+        fi
+
         if ! confirm "Send AT+CGATT=0?"; then
                 echo "Cancelled."
                 logger -t "$logheader" "User cancelled: AT+CGATT=0"
@@ -107,10 +130,10 @@ do_usb_reset() {
 }
 
 # Option 3: Full modem reset via SMART CFUN
-# Sends AT+CFUN=1,1, restarts modem, cycles WAN, verifies LTE connectivity.
+# Sends AT+CFUN=0 + AT+CFUN=1 (soft reset), restarts modem, cycles WAN, verifies LTE connectivity.
 # Watchdog is blocked automatically by atcmd -C for the duration of the procedure.
 do_cfun_reset() {
-        echo "--- SMART CFUN reset (AT+CFUN=1,1) ---"
+        echo "--- SMART CFUN reset (AT+CFUN=0/1, soft reset) ---"
         echo "This restarts the modem and verifies LTE connectivity automatically."
         echo "The watchdog will be blocked for the duration of the procedure."
         if ! confirm "Execute SMART CFUN reset?"; then
@@ -136,12 +159,16 @@ do_cfun_reset() {
 #       The modem may respond with an unexpected state (e.g. exit code 240)
 #       even when the data connection appears active this is a known
 #       degraded MBIM state behaviour observed on Quectel EG18-EA.
-# WARNING: A watchdog (watchdog_mbim) must be active on the system.
-#          Without it, the connection will NOT be restored automatically
-#          after the MBIM disconnect.
+# WARNING: watchdog_mbim must be active - without it the connection will
+#          NOT be restored automatically after the MBIM disconnect.
 do_umbim_disconnect() {
         echo "--- MBIM disconnect (umbim -d $mbim_device disconnect) ---"
         echo "This forces a MBIM disconnect. The watchdog will intervene to restore it."
+
+        if ! check_watchdog_running "option 4"; then
+                return 1
+        fi
+
         if ! command -v umbim >/dev/null 2>&1; then
                 echo "Error: umbim not installed."
                 logger -t "$logheader" "umbim not found"
@@ -194,6 +221,11 @@ do_ip_change_test() {
         echo "--- Force IP change test ---"
         echo "This blocks the watchdog, disconnects LTE and waits 5 minutes."
         echo "The carrier should release the current IP during this time."
+
+        if ! check_watchdog_running "option 6"; then
+                return 1
+        fi
+
         if ! confirm "Proceed?"; then
                 echo "Cancelled."
                 logger -t "$logheader" "User cancelled: IP change test"
@@ -216,13 +248,20 @@ do_ip_change_test() {
 # Waits for atcmd -C to signal it is about to run the ping test,
 # then removes ping_once_force_fail so atcmd can verify real connectivity.
 # Tests the full escalation ladder: ping_failed -> umbim disconnect ->
-# safe_ifup -> ping_verify -> atcmd -C -> connectivity verified.
-# WARNING: A watchdog (watchdog_mbim) must be active on the system.
+# safe_ifup -> ping_verify -> atcmd -S/-C (per remove_cell_lock policy;
+# atcmd -S falls back to atcmd -C when no cell-lock is active) ->
+# connectivity verified.
+# WARNING: watchdog_mbim must be active.
 do_escalation_test() {
     echo "--- Full escalation test ---"
     echo "Simulates connectivity loss via ping_once_force_fail flag file."
-    echo "Tests the full escalation ladder up to atcmd -C."
-    echo "WARNING: watchdog_mbim must be active."
+    echo "Tests the full escalation ladder up to atcmd -S/-C (per remove_cell_lock policy)."
+
+    if ! check_watchdog_running "option 7"; then
+        return 1
+    fi
+
+    echo "WARNING: watchdog_mbim is active."
     if ! confirm "Proceed?"; then
         echo "Cancelled."
         logger -t "$logheader" "User cancelled: escalation test"
@@ -231,9 +270,15 @@ do_escalation_test() {
 
     logger -t "$logheader" "escalation test: started"
 
-    # Enable debug logging
-    logger -t "$logheader" "escalation test: enabling watchdog debug"
-    touch /tmp/watchdog/mbim_debug
+    # Enable debug logging only if not already active.
+    # Tracks ownership to avoid removing a pre-existing debug file in cleanup.
+    if [ ! -f "$debug_file" ]; then
+        touch "$debug_file"
+        debug_locked=1
+        logger -t "$logheader" "escalation test: enabling watchdog debug"
+    else
+        logger -t "$logheader" "escalation test: watchdog debug already active, not touching"
+    fi
 
     # Force ping failure via ping_once_force_fail
     logger -t "$logheader" "escalation test: forcing ping failure (ping_once_force_fail)"
@@ -259,9 +304,12 @@ do_escalation_test() {
     logger -t "$logheader" "escalation test: removing ping_once_force_fail, atcmd ping test can proceed"
     rm -f /tmp/watchdog/ping_once_force_fail
 
-    # Disable debug logging
-    logger -t "$logheader" "escalation test: disabling watchdog debug"
-    rm -f /tmp/watchdog/mbim_debug
+    # Disable debug logging only if this script enabled it.
+    if [ "$debug_locked" -eq 1 ]; then
+        rm -f "$debug_file"
+        debug_locked=0
+        logger -t "$logheader" "escalation test: disabling watchdog debug"
+    fi
 
     logger -t "$logheader" "escalation test: completed"
 }
@@ -274,11 +322,11 @@ echo
 echo "Select operation:"
 echo "  1) Detach LTE connection (AT+CGATT=0)"
 echo "  2) Reset USB device (usbreset $usb_device_id)"
-echo "  3) Reset LTE module (SMART CFUN - AT+CFUN=1,1)"
+echo "  3) Reset LTE module (SMART CFUN - AT+CFUN=0/1, soft reset)"
 echo "  4) Force MBIM disconnect (umbim disconnect)"
 echo "  5) Modem sanity check (AT+CIMI)"
 echo "  6) Force IP change test (block watchdog + disconnect 5min)"
-echo "  7) Full escalation test (blackhole + ping_failed -> atcmd -C)"
+echo "  7) Full escalation test (blackhole + ping_failed -> atcmd -S/-C)"
 echo
 read -r choice
 exit_code=0
