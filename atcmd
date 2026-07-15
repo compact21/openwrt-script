@@ -153,6 +153,7 @@ cleanup() {
     [ -n "$atcmd_cpin_file" ]    && [ -f "$atcmd_cpin_file" ]    && rm -f "$atcmd_cpin_file"
     [ -n "$atcmd_sanity_file" ]  && [ -f "$atcmd_sanity_file" ]  && rm -f "$atcmd_sanity_file"
     [ -n "$atcmd_qeng_file" ]    && [ -f "$atcmd_qeng_file" ]    && rm -f "$atcmd_qeng_file"
+    [ -n "$atcmd_cgatt_file" ]   && [ -f "$atcmd_cgatt_file" ]   && rm -f "$atcmd_cgatt_file"
 
     # Remove watchdog block file only if created by this script
     [ "${watchdog_locked:-0}" -eq 1 ] && rm -f "$watchdog_block_file"
@@ -519,12 +520,6 @@ unblock_watchdog() {
     fi
 }
 
-# Send AT+CEER and log the response for diagnostic purposes
-check_ceer_log() {
-    log "Send: AT+CEER (modem error diagnostic)..."
-    send_at 'AT+CEER' || true
-}
-
 # Check modem is genuinely responsive, not just echoing OK.
 # Sends AT+CIMI - requires real SIM access, not just AT echo.
 # Returns 0 if modem is healthy, 1 if zombie state detected.
@@ -591,6 +586,29 @@ check_lte_connection() {
     interface="$wan_device"
     diag_mode="${1:-}"
 
+    # Cleanup any stale ping_ready signal from previous invocation
+    rm -f /tmp/watchdog/atcmd_ping_ready
+
+    log "Checking GPRS/LTE attachment (AT+CGATT?)..."
+    cgatt_ok=0
+    atcmd_cgatt_file=$(mktemp) || { log "check_lte_connection: mktemp failed (cgatt)"; return 1; }
+    for i in $(seq 1 10); do
+        send_at "AT+CGATT?" "$delaytime" "$atcmd_cgatt_file"
+        if grep -q "+CGATT: 1" "$atcmd_cgatt_file"; then
+            log "Modem attached to GPRS/LTE."
+            cgatt_ok=1
+            break
+        fi
+        log "Waiting for GPRS/LTE attachment... ($i/10)"
+        sleep 2
+    done
+    rm -f "$atcmd_cgatt_file"
+    atcmd_cgatt_file=""
+    if [ "$cgatt_ok" -eq 0 ]; then
+        log "Error: Modem did not attach to GPRS/LTE."
+        return 1
+    fi
+
     log "Checking Network Registration status (AT+CEREG?)..."
     creg_ok=0
     atcmd_cereg_file=$(mktemp) || { log "check_lte_connection: mktemp failed"; return 1; }
@@ -634,7 +652,6 @@ check_lte_connection() {
     atcmd_cereg_file=""
     if [ "$creg_ok" -eq 0 ]; then
         log "Error: Modem did not register on LTE network. Aborting connectivity check."
-        check_ceer_log
         return 1
     fi
 
@@ -665,7 +682,6 @@ check_lte_connection() {
     atcmd_cgpaddr_file=""
     if [ -z "$pdp_ip" ]; then
         log "No IP address assigned to PDP context."
-        check_ceer_log
         return 1
     else
         log "PDP IP address detected: $pdp_ip"
@@ -789,6 +805,12 @@ count_cfun_op() {
 
 # smart_restart_procedure <type> [at_command]
 smart_restart_procedure() {
+
+# Note: atcmd -S uses soft CFUN reset (AT+CFUN=0/1) which preserves cell-locks.
+# The -S pre-check (AT+QNWLOCK?) is what enables removal if needed.
+# atcmd -C also uses soft reset (AT+CFUN=0/1), preserving any existing cell-locks.
+# Hard reset (AT+CFUN=1,1) is NOT used in normal recovery; only emergency scenarios.
+
     type="$1"
     block_watchdog
 
@@ -808,7 +830,6 @@ smart_restart_procedure() {
 
     if ! restart_modem; then
         log "CRITICAL: modem restart aborted (see previous error) during $type"
-        check_ceer_log
         unblock_watchdog
         exit 12
     fi
@@ -819,14 +840,12 @@ smart_restart_procedure() {
         log "Attempting second modem restart..."
         if ! restart_modem; then
             log "CRITICAL: second modem restart aborted (see previous error) during $type"
-            check_ceer_log
             unblock_watchdog
             exit 12
         fi
         restart_wan
         if ! check_modem_sanity; then
             log "CRITICAL: modem still in zombie state after second restart"
-            check_ceer_log
             unblock_watchdog
             exit 12
         fi
@@ -851,7 +870,6 @@ smart_restart_procedure() {
 
         if ! restart_modem; then
             log "CRITICAL: fallback modem restart aborted (see previous error) during $type"
-            check_ceer_log
             unblock_watchdog
             exit 12
         fi
@@ -859,7 +877,6 @@ smart_restart_procedure() {
 
         if ! check_modem_sanity; then
             log "CRITICAL: modem in zombie state after fallback restart"
-            check_ceer_log
             unblock_watchdog
             exit 12
         fi
@@ -867,14 +884,12 @@ smart_restart_procedure() {
         if [ "$type" = "QNWLOCK" ]; then
             check_lte_connection "qnwlock" || {
                 log "CRITICAL: $type failed after fallback"
-                check_ceer_log
                 unblock_watchdog
                 exit 12
             }
         else
             check_lte_connection || {
                 log "CRITICAL: $type failed after fallback"
-                check_ceer_log
                 unblock_watchdog
                 exit 12
             }
@@ -896,12 +911,14 @@ if [ "$smart_cfun" -eq 1 ]; then
     # Fail fast if the daily limit is already exhausted, before touching the AT port.
     # (Actual per-operation counting/enforcement happens in restart_modem() and
     # smart_restart_procedure(), so this also covers the -S/QNWLOCK code path.)
+    # Note: Cell-locks are volatile (RAM-based). atcmd -C uses soft reset (AT+CFUN=0/1)
+    # which preserves them. Use atcmd -S if cell-lock removal is needed.
     if cfun_limit_reached; then
         log "atcmd -C daily CFUN limit already reached, aborting"
         exit 11  # exit code specifico: limit reached
     fi
     log "Executing SMART CFUN restart procedure..."
-    smart_restart_procedure "SMART CFUN" "AT+CFUN=1,1"
+    smart_restart_procedure "SMART CFUN"
     exit 0
 fi
 
