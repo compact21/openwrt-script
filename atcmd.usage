@@ -14,12 +14,17 @@ Options:
   -n, --no-log         Disable syslog logging
 
   -S, --smart-qnwlock  Apply SMART QNWLOCK procedure:
-                        - If AT+QNWLOCK="common/4g",[1-9]*: restart modem, restart WAN, check LTE automatically.
-                        - If AT+QNWLOCK="common/4g",0: check if any cell-locks active. SMART procedure runs only if needed.
-                        - If AT+QNWLOCK="common/4g": executes only the standard AT command; no SMART procedure.
+                       - Queries current cell-lock status (AT+QNWLOCK="common/4g"?)
+                       - If lock present: removes it (AT+QNWLOCK="common/4g",0),
+                         then restarts modem via soft CFUN (AT+CFUN=0/1),
+                         restarts WAN, and checks LTE connectivity.
+                       - If no lock: returns rc=13, no CFUN budget consumed.
+                       Accepts AT+QNWLOCK command as parameter.
 
-  -C, --smart-cfun     Execute SMART CFUN procedure (AT+CFUN=1,1) with modem restart, WAN restart, and LTE connectivity check.
+  -C, --smart-cfun     Execute SMART CFUN procedure (AT+CFUN=0 + AT+CFUN=1)
+                       with modem restart, WAN restart, and LTE connectivity check.
                        Does not accept additional AT commands.
+                       Preserves any existing cell-lock configuration.
 
   -Z, --sanity-check   Check modem is genuinely responsive (AT+CIMI)
                        Returns 0 if healthy, 1 if zombie state detected
@@ -49,10 +54,20 @@ Warning:
   - Commands and responses are logged to syslog by default (use -n to disable).
 
 Warning - special commands:
-  - Using -S with AT+QNWLOCK will restart the modem, restart WAN, and check LTE automatically.
-    Only effective when <n> >= 1; otherwise executes as standard QNWLOCK.
-  - Using AT+CFUN=1,1 will automatically restart the modem, restart the WAN interface,
-    wait for modem readiness, and then resume operation to ensure LTE connectivity.
+  - Many AT commands modify persistent modem settings (NVRAM).
+  - Using -S with AT+QNWLOCK will restart the modem and restart WAN, then verify LTE automatically.
+  - Using -C performs a soft CFUN reset (AT+CFUN=0/1), preserving any cell-lock configuration.
+  - The CFUN operation counter is enforced daily to preserve modem flash lifespan.
+
+Daily CFUN limit: 15 operations per day (uptime-based 24h window).
+Return codes:
+  0  = success
+  11 = daily CFUN limit reached (escalation aborted)
+  12 = critical failure (modem unresponsive, zombie state, etc)
+  13 = atcmd -S: no active cell-lock (fallback to atcmd -C recommended)
+
+Return code 13 (no cell-lock) is not a failure; it informs the watchdog that
+removal is unnecessary and -C can be used directly to save CFUN budget.
 
 Examples:
 
@@ -113,38 +128,40 @@ atcmd 'AT+QCFG="usbnet"';                             # Show USB network type (0
 atcmd 'AT+QCFG="usbcfg",0x2C7C,0x0512,1,1,1,1,1,1,0'; # Enable ADB interface
 
 # Modem Control
-atcmd 'AT+QPOWD=1';      # Power off the LTE modem - WARNING: modem will NOT restart automatically, may cause permanent loss of remote connectivity if no watchdog is in place
-atcmd 'AT+CFUN=1,1';     # Soft reboot modem and enable radio (full restart) without check - WARNING: may cause permanent loss of remote connectivity if no watchdog is in place
 atcmd 'AT+QTEMP';        # Show modem temperature
+atcmd 'AT+QPOWD=1';      # Power off the LTE modem - WARNING: modem will NOT restart automatically, may cause permanent loss of remote connectivity if no watchdog is in place
+atcmd 'AT+CFUN=1,1';     # Hard reboot modem and enable radio (full reset). 
+                         # WARNING: hard reset removes any cell-lock as a side effect 
+                         #          (cell-locks are volatile in modem RAM).
+                         # WARNING: only for emergency scenarios; regular recovery 
+                         #          should use atcmd -C or -S instead.
 
----------------------------------------------------------------------------------------
+========================================================================================
+STANDARD AT+QNWLOCK COMMANDS
+========================================================================================
 
-# Standard AT+QNWLOCK commands
 atcmd 'AT+QNWLOCK="common/4g"';            # Show current cell lock status
 atcmd 'AT+QNWLOCK="common/4g",0';          # Disable cell lock without check or fallback
 atcmd 'AT+QNWLOCK="common/4g",1,1650,100'; # Single cell lock without check or fallback
 
----------------------------------------------------------------------------------------
-
-# Smart QNWLOCK Examples (-S)
+========================================================================================
+SMART QNWLOCK EXAMPLES (-S)
+========================================================================================
 
 # SMART QNWLOCK performs the following steps automatically:
-# 1. Blocks the watchdog to prevent interference from automatic recovery scripts.
+# 1. Queries current cell-lock status (AT+QNWLOCK="common/4g"?)
 # 2. Sends the AT command passed by the user (if it specifies a cell lock > 0).
-# 3. Restarts the modem (AT+CFUN=0 then AT+CFUN=1) to apply changes.
-# 4. Restarts the WAN interface (ubus down/up) to refresh network connectivity.
-# 5. Waits for LTE registration and interface readiness.
-# 6. Checks PDP IP and interface IPv4 address.
-# 7. Runs ping tests to verify LTE connectivity.
-# 8. Logs results and unblocks the watchdog.
-#
-# On failure at any step after modem restart:
-#  - A fallback procedure is attempted: cell-lock is removed, modem and WAN
-#    are restarted, and connectivity is checked again.
-#  - If connectivity is not restored after fallback, script exits with code 12.
+# 3. Restarts modem via soft CFUN (AT+CFUN=0â1).
+# 4. Restarts WAN interface.
+# 5. Checks LTE connectivity via standard diagnostics.
+# 6. On failure: 
+#    - Logs the failure
+#    - Fallback procedure is NOT attempted with -S alone
+#    - (Fallback logic is delegated to the watchdog_mbim daemon)
 
-# SMART QNWLOCK only executes the full procedure if cell-locks are active.
-# If the cell-lock is 0 or not present, it will just execute the standard AT command.
+# SMART QNWLOCK only executes the full procedure if cell-locks are active 
+# (AT+QNWLOCK value >= 1). If no lock is present, it returns rc=13 without 
+# consuming CFUN budget.
 
 # Smart QNWLOCK examples
 atcmd -S 'AT+QNWLOCK="common/4g"';                            # Execute standard command only
@@ -152,37 +169,40 @@ atcmd -S 'AT+QNWLOCK="common/4g",0';                          # Execute SMART on
 atcmd -S 'AT+QNWLOCK="common/4g",1,1650,100';                 # Monte Bondone Cima Palon 230131 or 231131
 atcmd -S 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Cima Palon 230131 or 231131
 
----------------------------------------------------------------------------------------
+========================================================================================
+SMART CFUN EXAMPLES (-C)
+========================================================================================
 
-# Smart CFUN Example (-C)
+# SMART CFUN performs the following steps automatically:
+# 1. Restarts modem via soft CFUN (AT+CFUN=0/1)
+#    NOTE: Soft reset preserves existing cell-lock configuration
+# 2. Restarts WAN interface.
+# 3. Checks LTE connectivity via standard diagnostics.
+# 4. Returns 0 on success, 11 if daily limit reached, 12 on failure.
 
-# SMART CFUN performs a full modem restart and connectivity verification:
-# 1. Blocks the watchdog to prevent interference.
-# 2. Checks daily CFUN invocation limit (max 15/24h). Exits with code 11 if limit reached.
-# 3. Sends AT+CFUN=1,1 to perform a soft modem restart.
-# 4. Waits for the modem device (/dev/ttyUSB2) to be ready.
-# 5. Checks if the modem responds to basic "AT" commands.
-# 6. Restarts the WAN interface (ubus down/up) to refresh network connectivity.
-# 7. Waits for LTE registration and interface readiness.
-# 8. Verifies PDP IP address assigned by the modem.
-# 9. Confirms that the network interface has an IPv4 address.
-# 10. Performs ping tests to ensure LTE connectivity.
-# 11. Logs results to syslog and terminal.
-# 12. Unblocks the watchdog at the end of the procedure.
-#
-# On failure at any step after modem restart:
-#  - A fallback procedure is attempted: modem and WAN are restarted, and
-#    connectivity is checked again.
-#  - If connectivity is not restored after fallback, script exits with code 12.
-#
-# Notes:
-#  - SMART CFUN is always executed with AT+CFUN=1,1; no additional AT commands can be passed with -C.
-#  - Intended to restore LTE connectivity automatically.
-#  - The full procedure may take up to 2 minutes depending on modem registration and WAN restart.
-#  - The SMART CFUN daily limit (15/24h) is enforced by atcmd, but counter reset is not handled internally.
-#    An external process is responsible for resetting the tracking files, since atcmd may not be executed
-#    during the rollover period.
+# Smart CFUN is used for general connectivity recovery without 
+# touching cell-lock configuration. Use -C when cell-lock 
+# management is not needed (remove_cell_lock=0 in watchdog_mbim).
 
-atcmd -C  # Execute SMART CFUN restart procedure
+# Smart CFUN examples
+atcmd -C                    # Soft CFUN restart, preserve cell-lock
+atcmd -C                    # Can be repeated (respects daily limit)
 
 ========================================================================================
+HARD RESET vs SOFT RESET
+========================================================================================
+
+AT+CFUN=1,1 (Hard Reset):
+  - Full modem reboot
+  - Clears modem RAM state
+  - Removes cell-locks (volatile, not NV memory)
+  - Reloads firmware from flash
+  - Use only in emergencies (watchdog escalation does NOT use this)
+
+AT+CFUN=0 + AT+CFUN=1 (Soft Reset):
+  - Radio power cycle only
+  - Preserves modem RAM (NVRAM untouched, cell-locks preserved)
+  - Standard recovery sequence in atcmd -C and atcmd -S
+
+The watchdog_mbim daemon uses soft reset (-C and -S) for regular recovery.
+Hard reset (AT+CFUN=1,1) is NOT used in normal escalation flows.
