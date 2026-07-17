@@ -47,7 +47,9 @@ atcmd_cereg_file="" # Temp file for AT+CEREG? poll output
 atcmd_cgpaddr_file="" # Temp file for AT+CGPADDR output
 atcmd_cpin_file="" # wait_for_modem_response(): AT+CPIN? output
 atcmd_qeng_file="" # Temp file for AT+QENG="servingcell" output
-atcmd_sanity_file="" # Temp file for AT+CIMI sanity check output
+atcmd_cimi_file="" # Temp file for AT+CIMI output
+atcmd_cgatt_file="" # Temp file for AT+CGATT? output
+pre_escalation_diag=0 # Set by -D flag; runs pre-escalation diagnostics
 sanity_check=0 # Set by -Z flag; runs modem sanity check
 watchdog_block_file="/tmp/watchdog/watchdog.block" # Watchdog block file path
 watchdog_locked=0 # Tracks whether this script created the watchdog block file
@@ -151,7 +153,7 @@ cleanup() {
     [ -n "$atcmd_cereg_file" ]   && [ -f "$atcmd_cereg_file" ]   && rm -f "$atcmd_cereg_file"
     [ -n "$atcmd_cgpaddr_file" ] && [ -f "$atcmd_cgpaddr_file" ] && rm -f "$atcmd_cgpaddr_file"
     [ -n "$atcmd_cpin_file" ]    && [ -f "$atcmd_cpin_file" ]    && rm -f "$atcmd_cpin_file"
-    [ -n "$atcmd_sanity_file" ]  && [ -f "$atcmd_sanity_file" ]  && rm -f "$atcmd_sanity_file"
+    [ -n "$atcmd_cimi_file" ]    && [ -f "$atcmd_cimi_file" ]    && rm -f "$atcmd_cimi_file"
     [ -n "$atcmd_qeng_file" ]    && [ -f "$atcmd_qeng_file" ]    && rm -f "$atcmd_qeng_file"
     [ -n "$atcmd_cgatt_file" ]   && [ -f "$atcmd_cgatt_file" ]   && rm -f "$atcmd_cgatt_file"
 
@@ -202,12 +204,6 @@ while [ $# -gt 0 ]; do
         -n|--no-log)
             nologger=1
             ;;
-        -S|--smart-qnwlock)
-            smart_qnwlock=1
-            ;;
-        -C|--smart-cfun)
-            smart_cfun=1
-            ;;
         --internal-watchdog)
             watchdog_mbim_pid=$(cat /var/run/watchdog_mbim.pid 2>/dev/null)
             if [ -n "$watchdog_mbim_pid" ] && [ "$PPID" -eq "$watchdog_mbim_pid" ] 2>/dev/null; then
@@ -216,6 +212,15 @@ while [ $# -gt 0 ]; do
                 echo "ERROR: --internal-watchdog reserved"
                 exit 1
             fi
+            ;;
+        -C|--smart-cfun)
+            smart_cfun=1
+            ;;
+        -D|--pre-escalation-diag)
+            pre_escalation_diag=1
+            ;;
+        -S|--smart-qnwlock)
+            smart_qnwlock=1
             ;;
         -Z|--sanity-check)
             sanity_check=1
@@ -230,7 +235,18 @@ while [ $# -gt 0 ]; do
             ;;
         *)
             if [ -z "$atcommand" ]; then
-                atcommand="$1"
+                case "$1" in
+                    -*)
+                        echo "Unknown option: $1"
+                        if [ -f "$usage_file" ]; then
+                            awk '/^Notes:/ {exit} {print}' "$usage_file"
+                        fi
+                        exit 1
+                    ;;
+                    *)
+                        atcommand="$1"
+                    ;;
+                esac
             else
                 echo "Unknown option or extra argument: $1"
                 if [ -f "$usage_file" ]; then
@@ -245,10 +261,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-# -S, -C and -Z are mutually exclusive: only one smart mode can run per invocation.
-smart_flags_count=$((smart_qnwlock + smart_cfun + sanity_check))
+# -C, -D, -S, and  -Z are mutually exclusive: only one smart mode can run per invocation.
+smart_flags_count=$((smart_qnwlock + smart_cfun + sanity_check + pre_escalation_diag))
 if [ "$smart_flags_count" -gt 1 ]; then
-    echo "ERROR: -S/--smart-qnwlock, -C/--smart-cfun and -Z/--sanity-check are mutually exclusive. Use only one per invocation."
+    echo "ERROR: -S/--smart-qnwlock, -C/--smart-cfun, -Z/--sanity-check and -D/--pre-escalation-diag are mutually exclusive. Use only one per invocation."
     exit 1
 fi
 
@@ -321,6 +337,7 @@ if [ "$internal_watchdog" -ne 1 ]; then
 else
     # watchdog interno: bypass lock
     logger -t "$logheader" "Watchdog mode: skipping atomic lock"
+    echo "Watchdog mode: skipping atomic lock"
 fi
 
 # Check if $atcmd_dir directory exists, if not, create it
@@ -372,9 +389,9 @@ if [ "$delaytime" -le 0 ]; then
 fi
 
 # Validation: an AT command is required UNLESS smart mode is active
-if [ -z "$atcommand" ] && [ "$smart_cfun" -ne 1 ] && [ "$smart_qnwlock" -ne 1 ] && [ "$sanity_check" -ne 1 ]; then
+if [ -z "$atcommand" ] && [ "$smart_cfun" -ne 1 ] && [ "$smart_qnwlock" -ne 1 ] && [ "$sanity_check" -ne 1 ] && [ "$pre_escalation_diag" -ne 1 ]; then
     echo "ERROR: No AT command provided and no Smart Mode enabled."
-    echo "Usage: $0 [AT_COMMAND] or use -S / -C / -Z flags."
+    echo "Usage: $0 [AT_COMMAND] or use -C / -D / -S / -Z flags."
     echo
     if [ -f "$usage_file" ]; then
         awk '/^Notes:/ {exit} {print}' "$usage_file"
@@ -525,16 +542,16 @@ unblock_watchdog() {
 # Returns 0 if modem is healthy, 1 if zombie state detected.
 check_modem_sanity() {
     log "Modem sanity check (AT+CIMI)..."
-    atcmd_sanity_file=$(mktemp) || { log "check_modem_sanity: mktemp failed"; return 1; }
+    atcmd_cimi_file=$(mktemp) || { log "check_modem_sanity: mktemp failed"; return 1; }
 
     nologger_saved=$nologger
     nologger=1
-    send_at "AT+CIMI" "$delaytime" "$atcmd_sanity_file" >/dev/null 2>&1
+    send_at "AT+CIMI" "$delaytime" "$atcmd_cimi_file" >/dev/null 2>&1
     nologger=$nologger_saved
 
-    imsi=$(tr '\r' '\n' < "$atcmd_sanity_file" | grep -oE '^[0-9]{10,15}$' | head -n 1)
-    rm -f "$atcmd_sanity_file"
-    atcmd_sanity_file=""
+    imsi=$(tr '\r' '\n' < "$atcmd_cimi_file" | grep -oE '^[0-9]{10,15}$' | head -n 1)
+    rm -f "$atcmd_cimi_file"
+    atcmd_cimi_file=""
 
     if [ -z "$imsi" ]; then
         log "Modem sanity check FAILED - modem may be in zombie state"
@@ -901,6 +918,110 @@ smart_restart_procedure() {
     unblock_watchdog
 }
 
+# Pre-escalation AT diagnostics: query critical modem state before recovery attempts
+# Captures: registration status, GPRS attachment, IMSI, APN/PDP address
+# This is read-only; does NOT modify any modem state. Used to log diagnostics
+# at the moment of escalation decision, aiding troubleshooting.
+# Returns 0 on successful queries, 1 if any critical query fails.
+pre_escalation_at_diagnostics() {
+    local diag_timeout=120
+    local diag_rc=0
+
+    log "pre-escalation: executing AT diagnostics..."
+
+    # Query 1: AT+CEREG? (registration status)
+    # Response format: +CEREG: <n>,<stat>[,<lac>,<ci>[,<AcT>]]
+    # <stat>: 0=not registered, 1=home, 2=searching, 3=denied, 5=roaming
+    atcmd_cereg_file=$(mktemp) || { log "pre-escalation: AT+CEREG mktemp failed"; return 1; }
+    send_at "AT+CEREG?" "$diag_timeout" "$atcmd_cereg_file" 2>/dev/null
+    if [ -s "$atcmd_cereg_file" ]; then
+        cereg_result=$(grep "^+CEREG:" "$atcmd_cereg_file" | head -1)
+        if [ -n "$cereg_result" ]; then
+            log "pre-escalation: $cereg_result"
+        else
+            log "pre-escalation: AT+CEREG? query FAILED or no response"
+            diag_rc=1
+        fi
+    else
+        log "pre-escalation: AT+CEREG? timeout or device unreachable"
+        diag_rc=1
+    fi
+    rm -f "$atcmd_cereg_file"
+    atcmd_cereg_file=""
+
+    # Query 2: AT+CGATT? (GPRS attachment status)
+    # Response format: +CGATT: <stat>
+    # <stat>: 0=detached, 1=attached
+    atcmd_cgatt_file=$(mktemp) || { log "pre-escalation: AT+CGATT mktemp failed"; return 1; }
+    send_at "AT+CGATT?" "$diag_timeout" "$atcmd_cgatt_file" 2>/dev/null
+    if [ -s "$atcmd_cgatt_file" ]; then
+        cgatt_result=$(grep "^+CGATT:" "$atcmd_cgatt_file" | head -1)
+        if [ -n "$cgatt_result" ]; then
+            log "pre-escalation: $cgatt_result"
+        else
+            log "pre-escalation: AT+CGATT? query FAILED or no response"
+        fi
+    else
+        log "pre-escalation: AT+CGATT? timeout"
+    fi
+    rm -f "$atcmd_cgatt_file"
+    atcmd_cgatt_file=""
+
+    # Query 3: AT+CIMI (IMSI - International Mobile Subscriber Identity)
+    # Response format: IMSI as raw number (15 digits typically)
+    # Presence of IMSI indicates SIM is recognized by modem
+    atcmd_cimi_file=$(mktemp) || { log "pre-escalation: AT+CIMI mktemp failed"; return 1; }
+
+    nologger_saved=$nologger
+    nologger=1
+    send_at "AT+CIMI" "$diag_timeout" "$atcmd_cimi_file" >/dev/null 2>&1
+    nologger=$nologger_saved
+
+    if [ -s "$atcmd_cimi_file" ]; then
+        cimi_result=$(tr '\r' '\n' < "$atcmd_cimi_file" | grep -oE '^[0-9]{10,15}$' | head -n 1)
+        if [ -n "$cimi_result" ]; then
+            # No log digits for privacy
+            log "pre-escalation: IMSI present (SIM recognized)"
+        else
+            log "pre-escalation: AT+CIMI query FAILED - SIM may not be recognized"
+            diag_rc=1
+        fi
+    else
+        log "pre-escalation: AT+CIMI timeout"
+        diag_rc=1
+    fi
+    rm -f "$atcmd_cimi_file"
+    atcmd_cimi_file=""
+
+    # Query 4: AT+CGPADDR (PDP address - assigned IP)
+    # Response format: +CGPADDR: <cid>[,<PDP_addr_1>[,<PDP_addr_2>]]
+    # <cid>: Context ID (usually 1), <PDP_addr>: IPv4 or IPv6 address
+    # This shows if PDP context is active and has an IP assigned
+    atcmd_cgpaddr_file=$(mktemp) || { log "pre-escalation: AT+CGPADDR mktemp failed"; return 1; }
+    send_at "AT+CGPADDR=1" "$diag_timeout" "$atcmd_cgpaddr_file" 2>/dev/null
+    if [ -s "$atcmd_cgpaddr_file" ]; then
+        cgpaddr_result=$(grep "^+CGPADDR:" "$atcmd_cgpaddr_file" | head -1)
+        if [ -n "$cgpaddr_result" ]; then
+            log "pre-escalation: $cgpaddr_result"
+        else
+            log "pre-escalation: AT+CGPADDR? query FAILED - no PDP context"
+        fi
+    else
+        log "pre-escalation: AT+CGPADDR timeout"
+    fi
+    rm -f "$atcmd_cgpaddr_file"
+    atcmd_cgpaddr_file=""
+
+    # Summary
+    if [ "$diag_rc" -eq 0 ]; then
+        log "pre-escalation: AT diagnostics completed successfully"
+    else
+        log "pre-escalation: AT diagnostics INCOMPLETE (some queries failed)"
+    fi
+
+    return "$diag_rc"
+}
+
 # Smart CFUN procedure
 if [ "$smart_cfun" -eq 1 ]; then
     if [ -n "$atcommand" ]; then
@@ -920,6 +1041,21 @@ if [ "$smart_cfun" -eq 1 ]; then
     log "Executing SMART CFUN restart procedure..."
     smart_restart_procedure "SMART CFUN"
     exit 0
+fi
+
+# Pre-escalation diagnostics
+# Can be used independently OR with --internal-watchdog flag.
+# When used with --internal-watchdog, diagnostics are executed and logged
+# before watchdog proceeds with escalation decisions.
+if [ "$pre_escalation_diag" -eq 1 ]; then
+    if [ -n "$atcommand" ]; then
+        echo "Error: \"-D\" \"--pre-escalation-diag\" does not accept AT commands"
+        usage
+        exit 1
+    fi
+    log "Executing pre-escalation AT diagnostics..."
+    pre_escalation_at_diagnostics
+    exit $?
 fi
 
 # Modem sanity check
