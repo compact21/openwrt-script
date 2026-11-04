@@ -12,14 +12,35 @@ Options:
   -d, --delay <ms>     Delay in milliseconds (default: 600)
   -o, --output <file>  Save output (only /tmp/atcmd/)
   -n, --no-log         Disable syslog logging
+  -c, --show-config    Print the configuration used by atcmd (config file in use,
+                       imported values with their origin, fixed settings) and exit.
+                       Read-only: does not touch the modem or the AT port.
+                       Note: -c (lowercase) only prints; -C (uppercase) restarts
+                       the modem. Cannot be combined with other actions.
 
-  -S, --smart-qnwlock  Apply SMART QNWLOCK procedure:
-                       - Queries current cell-lock status (AT+QNWLOCK="common/4g"?)
-                       - If lock present: removes it (AT+QNWLOCK="common/4g",0),
-                         then restarts modem via soft CFUN (AT+CFUN=0/1),
-                         restarts WAN, and checks LTE connectivity.
-                       - If no lock: returns rc=13, no CFUN budget consumed.
-                       Accepts AT+QNWLOCK command as parameter.
+  -S, --smart-qnwlock  Apply SMART QNWLOCK procedure. Accepts an
+                       AT+QNWLOCK="common/4g",... command as parameter;
+                       behaviour depends on its value:
+                       - Setting a lock (value 1-9): sent immediately, then
+                         restarts modem via soft CFUN (AT+CFUN=0/1), restarts
+                         WAN, and checks LTE connectivity. No preventive query.
+                         If connectivity fails, the lock is removed and the restart is
+                         repeated once.
+                       - Removing a lock (value 0): first queries current
+                         cell-lock status (AT+QNWLOCK="common/4g"?); only if a
+                         lock is actually active does it remove it and run the
+                         same restart/WAN/connectivity sequence above.
+                         If no lock is active: returns rc=13, no CFUN budget
+                         consumed.
+                         If the query gets no answer (it is retried once with a
+                         longer delay): returns rc=12 and nothing is sent.
+
+  -D, --at-diag        Run AT diagnostics snapshot (read-only, does not modify
+                       modem state): AT+CEREG? (registration), AT+CGATT?
+                       (GPRS attach), AT+CIMI (SIM/IMSI), AT+CGPADDR=1 (PDP
+                       address). Does not accept additional AT commands.
+                       Returns 0 if critical queries succeed, 1 if AT+CEREG?
+                       or AT+CIMI fails/times out.
 
   -C, --smart-cfun     Execute SMART CFUN procedure (AT+CFUN=0 + AT+CFUN=1)
                        with modem restart, WAN restart, and LTE connectivity check.
@@ -35,15 +56,28 @@ Options:
 Notes:
 
   - If -a/--at is omitted, the first non-option argument is treated as the AT command.
-  - atcmd -C exits with code 11 if the daily CFUN invocation limit has been reached (15/24h window).
+  - atcmd -C exits with code 11 if the daily CFUN limit has been reached (14 AT+CFUN operations
+    per 24h window by default; each modem restart uses 2).
   - The default AT port is /dev/ttyUSB2.
-  - The WAN interface name is configured via wan_iface at the top of the script.
+  - ttyport, cfun_daily_max, iface (WAN interface name) and ping_targets can be overridden in
+    /tmp/watchdog/mbim.conf (runtime copy) or /etc/watchdog_mbim.conf, if present; otherwise the
+    defaults at the top of the script are used.
   - This utility is not compatible with ModemManager.
   - Output files are restricted to /tmp/atcmd/ for safety reasons.
   - AT commands are blocked if /tmp/watchdog/atcmd_block exists.
   - Script exits with error (exit 5) if the interface defined in wan_iface
-    is not found via ubus at startup. Edit wan_iface at the top of the script
-    to match the LTE interface name defined in /etc/config/network.
+    is not found via ubus at startup (does not apply to -C, -S, -D, to
+    AT+CFUN=* via -a, nor to AT+CGATT=1, AT+CGATT?, AT+CEREG?, AT+CPIN?, AT+COPS?
+    and AT+COPS=0; see below). Set iface in /etc/watchdog_mbim.conf (or edit wan_iface at the top
+    of the script) to match the LTE interface name defined in /etc/config/network.
+  - AT+CFUN=* commands issued via -a bypass the wan_iface check above, since
+    radio state is what determines interface presence, not the other way
+    round. Two related safeguards apply:
+      - If watchdog_mbim is running, the command is refused (exit 21) to avoid concurrent/uncoordinated
+        recovery attempts. Stop watchdog_mbim first if you need to send AT+CFUN manually.
+      - After a manual 'AT+CFUN=0' (radio OFF) + 'AT+CFUN=1' (radio ON) with watchdog_mbim stopped,
+        WAN does NOT recover automatically: run 'ifup wan' manually afterwards,
+        or use 'atcmd -C' instead, which restarts WAN and checks LTE connectivity as part of the same operation.
 
 Warning:
 
@@ -54,17 +88,48 @@ Warning:
   - Commands and responses are logged to syslog by default (use -n to disable).
 
 Warning - special commands:
-  - Many AT commands modify persistent modem settings (NVRAM).
-  - Using -S with AT+QNWLOCK will restart the modem and restart WAN, then verify LTE automatically.
+  - Using -S with AT+QNWLOCK setting a lock (or removing it while a lock is active) will restart the
+    modem and restart WAN, then verify LTE automatically.
   - Using -C performs a soft CFUN reset (AT+CFUN=0/1), preserving any cell-lock configuration.
   - The CFUN operation counter is enforced daily to preserve modem flash lifespan.
 
-Daily CFUN limit: 15 operations per day (uptime-based 24h window).
+Daily CFUN limit: 14 AT+CFUN operations per day by default (uptime-based 24h window, counted from
+the first operation; one restart = 2 operations, a failed -C/-S run uses at least 4). Set
+cfun_daily_max in /etc/watchdog_mbim.conf to change it (if /tmp/watchdog/mbim.conf exists it takes
+precedence: remove it and restart watchdog_mbim). The counter lives in /tmp: it is cleared at reboot.
+If the limit is reached right after AT+CFUN=0 (e.g. odd cfun_daily_max), AT+CFUN=1 is still sent
+(not counted), so the radio is never left OFF.
+
 Return codes:
   0  = success
-  11 = daily CFUN limit reached (escalation aborted)
-  12 = critical failure (modem unresponsive, zombie state, etc)
-  13 = atcmd -S: no active cell-lock (fallback to atcmd -C recommended)
+  1  = generic error: invalid/missing argument (-a, -d, -o), unknown option,
+       mutually exclusive flags used together, empty/invalid AT command,
+       missing dependency (picocom/ubus/jsonfilter), usage file not found, AT command
+       that did not return OK, or -Z/-D check failed
+  2  = AT port ($ttyport) not found after ttyport_timeout (modem not present)
+  3  = incompatible with ModemManager (proto 'modemmanager' found in config)
+  4  = blocked: /tmp/watchdog/atcmd_block exists
+  5  = wan_iface interface not found via ubus (does not apply to -C, -S, -D,
+       AT+CFUN=* via -a and the read/re-attach queries bypassing this check -
+       see Notes)
+  6  = AT port already in use by another process
+  7  = invalid -d/--delay value (must be numeric and > 0)
+  8  = cannot create required directory, or -o/--output path invalid
+       (must be inside /tmp/atcmd/ with no '..' components, parent directory must exist)
+  9  = -S: invalid AT+QNWLOCK command format
+  11 = daily CFUN limit reached, refused before any action was taken
+       (pre-checked by -C only, before touching the modem)
+  12 = critical failure during -S/-C (modem restart failed, or zombie state
+       persists after restart and fallback attempts); also returned by -S
+       if the AT+QNWLOCK query gets no answer after 2 attempts (nothing is sent,
+       lock state unknown), and by -S
+       if the daily CFUN limit is reached mid-procedure - in that case the
+       requested AT+QNWLOCK command has already been sent (lock config may
+       be updated) but the restart needed to apply it could not run
+  13 = -S: no active cell-lock (fallback to atcmd -C recommended)
+  20 = another instance is already running (lock directory exists)
+  21 = manual AT+CFUN=* via -a refused because watchdog_mbim is running
+       (stop watchdog_mbim first, then repeat the command)
 
 Return code 13 (no cell-lock) is not a failure; it informs the watchdog that
 removal is unnecessary and -C can be used directly to save CFUN budget.
@@ -86,11 +151,11 @@ atcmd 'AT+CGACT=0,1';     # Deactivate PDP context 1
 atcmd 'AT+CGATT?';        # Check if modem is attached to network
 
 # SIM Status
-atcmd 'AT+CPIN?';                # Check SIM status (READY, PIN required, etc.)
-atcmd 'AT+CCID';                 # Show SIM CCID (only works if SIM is inserted)
-atcmd 'AT+CLCK="SC",0,"1234"'    # Disable SIM PIN (replace 1234 with actual PIN)
-atcmd 'AT+CLCK="SC",1,"1234"'    # Enable SIM PIN
-atcmd 'AT+CPWD="SC","OLD","NEW"' # Change SIM PIN
+atcmd 'AT+CPIN?';                 # Check SIM status (READY, PIN required, etc.)
+atcmd 'AT+CCID';                  # Show SIM CCID (only works if SIM is inserted)
+atcmd 'AT+CLCK="SC",0,"1234"';    # Disable SIM PIN (replace 1234 with actual PIN)
+atcmd 'AT+CLCK="SC",1,"1234"';    # Enable SIM PIN
+atcmd 'AT+CPWD="SC","OLD","NEW"'; # Change SIM PIN
 
 # Network Information
 atcmd 'AT+CGPADDR=1';     # Show current IP address
@@ -110,17 +175,24 @@ atcmd 'AT+QNETINFO="servingcell"';  # Show current network info
 atcmd 'AT+QENG="neighbourcell"';    # Show neighbouring cells
 
 # Carrier Aggregation
-atcmd 'AT+QCAINFO';                 # Show carrier aggregation info, Requires active data traffic; otherwise returns "OK" only
+atcmd 'AT+QCAINFO';                 # Show carrier aggregation info (LTE only), Requires active data traffic; otherwise returns "OK" only
 
 # SMS Storage / Voice Function
 atcmd 'AT+CPMS?';                                # Show current SMS storage
 atcmd 'AT+CPMS="ME","ME","ME"'; atcmd 'AT+CSAS'; # Set and save SMS storage to ME
 atcmd 'AT+QCFG="call_control",1,1';              # Disable voice call support
 
+# Network Scan Mode (RAT selection)
+atcmd 'AT+QCFG="nwscanmode"';       # Show current configuration
+atcmd 'AT+QCFG="nwscanmode",0,1';   # Restore automatic mode (LTE/WCDMA) - immediate effect
+atcmd 'AT+QCFG="nwscanmode",2,1';   # Force WCDMA (3G) only - immediate effect, no reboot required
+atcmd 'AT+QCFG="nwscanmode",3,1';   # Force LTE only - immediate effect, no reboot required
+
 # LTE Bands
 atcmd 'AT+QCFG="band",0,5,0,1';                # Use LTE bands 1+3 only
 atcmd 'AT+QCFG="band",0,45,0,1';               # Use LTE bands 1+3+7 only
 atcmd 'AT+QCFG="band",0,80045,0,1';            # Use LTE bands 1+3+7+20 only
+atcmd 'AT+QCFG="band",0,8000005,0,1';          # Use LTE bands 1+3+28 only
 atcmd 'AT+QCFG="band",8d0,1A0080800D5,0,1';    # Enable all supported LTE bands (EG18-EA)
 
 # USB / Network Interface
@@ -142,32 +214,34 @@ STANDARD AT+QNWLOCK COMMANDS
 
 atcmd 'AT+QNWLOCK="common/4g"';            # Show current cell lock status
 atcmd 'AT+QNWLOCK="common/4g",0';          # Disable cell lock without check or fallback
-atcmd 'AT+QNWLOCK="common/4g",1,1650,100'; # Single cell lock without check or fallback
+atcmd 'AT+QNWLOCK="common/4g",1,1650,65';  # Single cell lock without check or fallback
 
 ========================================================================================
 SMART QNWLOCK EXAMPLES (-S)
 ========================================================================================
 
 # SMART QNWLOCK performs the following steps automatically:
-# 1. Queries current cell-lock status (AT+QNWLOCK="common/4g"?)
-# 2. Sends the AT command passed by the user (if it specifies a cell lock > 0).
-# 3. Restarts modem via soft CFUN (AT+CFUN=0â1).
-# 4. Restarts WAN interface.
-# 5. Checks LTE connectivity via standard diagnostics.
-# 6. On failure: 
-#    - Logs the failure
-#    - Fallback procedure is NOT attempted with -S alone
-#    - (Fallback logic is delegated to the watchdog_mbim daemon)
-
-# SMART QNWLOCK only executes the full procedure if cell-locks are active 
-# (AT+QNWLOCK value >= 1). If no lock is present, it returns rc=13 without 
-# consuming CFUN budget.
+# Setting a lock (value 1-9):
+# 1. Sends the AT command passed by the user (no preventive query).
+# 2. Restarts modem via soft CFUN (AT+CFUN=0/1).
+# 3. Restarts WAN interface.
+#    A modem sanity check (AT+CIMI) follows; if it fails, the restart is repeated once.
+# 4. Checks LTE connectivity via standard diagnostics.
+# 5. On failure, fallback inside atcmd -S:
+#    - Removes the cell-lock (AT+QNWLOCK="common/4g",0)
+#    - Restarts modem and WAN again and checks connectivity again
+#    - If it still fails, exits with rc=12
+# Removing a lock (value 0): first queries AT+QNWLOCK="common/4g"; the procedure above
+# (with the same fallback) runs only if a lock is active. If no lock is present, it
+# returns rc=13 without consuming CFUN budget. If the query gets no answer after
+# 2 attempts (the second with a longer delay), it returns rc=12 and sends nothing.
 
 # Smart QNWLOCK examples
-atcmd -S 'AT+QNWLOCK="common/4g"';                            # Execute standard command only
-atcmd -S 'AT+QNWLOCK="common/4g",0';                          # Execute SMART only if cell-locks are active
-atcmd -S 'AT+QNWLOCK="common/4g",1,1650,100';                 # Monte Bondone Cima Palon 230131 or 231131
-atcmd -S 'AT+QNWLOCK="common/4g",3,1650,100,1650,65,1500,50'; # Monte Bondone Cima Palon 230131 or 231131
+atcmd -S 'AT+QNWLOCK="common/4g"';                     # Execute standard command only
+atcmd -S 'AT+QNWLOCK="common/4g",0';                   # Execute SMART only if cell-locks are active
+
+atcmd -S 'AT+QNWLOCK="common/4g",1,100,65';            # Monte Bondone Cima Palon 230131 band 1
+atcmd -S 'AT+QNWLOCK="common/4g",2,1650,65,1500,65';   # Monte Bondone Cima Palon 230131 band 3
 
 ========================================================================================
 SMART CFUN EXAMPLES (-C)
@@ -177,8 +251,12 @@ SMART CFUN EXAMPLES (-C)
 # 1. Restarts modem via soft CFUN (AT+CFUN=0/1)
 #    NOTE: Soft reset preserves existing cell-lock configuration
 # 2. Restarts WAN interface.
-# 3. Checks LTE connectivity via standard diagnostics.
-# 4. Returns 0 on success, 11 if daily limit reached, 12 on failure.
+# 3. Runs a modem sanity check (AT+CIMI); if it fails, the restart is repeated once.
+# 4. Checks LTE connectivity via standard diagnostics.
+# 5. On failure, restarts modem and WAN once more (fallback) and checks again.
+# 6. Returns 0 on success, 11 if daily limit reached (checked before starting),
+#    12 on failure (also if the limit is reached during the procedure).
+# A failed run therefore uses at least 4 CFUN operations of the daily budget.
 
 # Smart CFUN is used for general connectivity recovery without 
 # touching cell-lock configuration. Use -C when cell-lock 
@@ -206,3 +284,34 @@ AT+CFUN=0 + AT+CFUN=1 (Soft Reset):
 
 The watchdog_mbim daemon uses soft reset (-C and -S) for regular recovery.
 Hard reset (AT+CFUN=1,1) is NOT used in normal escalation flows.
+The last escalation stage of the watchdog is a hardware power cycle through GPIO, which also clears
+cell-locks (verified on Quectel EG18-EA).
+
+---------------------------------------------------------------------------------------
+
+# AT+QCFG="nwscanmodeex" bitmask (range 1-63):
+#   Bit 0 (1)  = GSM
+#   Bit 3 (8)  = WCDMA/UMTS
+#   Bit 4 (16) = LTE
+#   24 = 16+8  = LTE + WCDMA (factory default, optimal for Europe)
+#   63         = all bits set (all technologies enabled)
+#
+# Relationship between nwscanmodeex and nwscanmode (they are synchronized):
+#   nwscanmode=0 (Auto)          nwscanmodeex=24 (LTE+WCDMA)
+#   nwscanmode=2 (WCDMA only)    nwscanmodeex=8
+#   nwscanmode=3 (LTE only)      nwscanmodeex=16
+#
+# nwscanmodeex accepts only one parameter (no effect/save flag)
+# nwscanmode accepts effect flag: AT+QCFG="nwscanmode",<val>,<0|1>
+#
+# Changing nwscanmodeex requires inactive PDP context (AT+CGACT=0,1)
+# Workaround: use nwscanmode instead, which allows changes with active connection
+#
+# To restore factory default (nwscanmodeex=24):
+#   Step 1 - set all technologies: AT+QCFG="nwscanmodeex",63
+#   Step 2 - set Auto mode:        AT+QCFG="nwscanmode",0
+#   Result: nwscanmodeex resets to 24 (LTE+WCDMA) automatically
+
+atcmd 'AT+QCFG="nwscanmodeex"';          # expected output: 24 (LTE+WCDMA, factory default)
+atcmd 'AT+QCFG="nwscanmode",0';          # set Auto (LTE+WCDMA) equivalent to nwscanmodeex=24
+atcmd 'AT+QCFG="nwscanseq",0501030402';  # scan sequence: EVDO>GSM>LTE>CDMA>WCDMA
