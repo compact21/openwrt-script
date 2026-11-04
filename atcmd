@@ -49,18 +49,46 @@ atcmd_cpin_file="" # wait_for_modem_response(): AT+CPIN? output
 atcmd_qeng_file="" # Temp file for AT+QENG="servingcell" output
 atcmd_cimi_file="" # Temp file for AT+CIMI output
 atcmd_cgatt_file="" # Temp file for AT+CGATT? output
-pre_escalation_diag=0 # Set by -D flag; runs pre-escalation diagnostics
+at_diag=0 # Set by -D flag; runs AT diagnostics snapshot
 sanity_check=0 # Set by -Z flag; runs modem sanity check
 watchdog_block_file="/tmp/watchdog/watchdog.block" # Watchdog block file path
+atcmd_block_file="/tmp/watchdog/atcmd_block" # AT command block file (set by watchdog_mbim during recovery)
+show_config=0 # Set by -c flag; prints the configuration used by atcmd and exits
 watchdog_locked=0 # Tracks whether this script created the watchdog block file
 
 # CFUN daily limit
 # Quectel EG18-EA firmware recommends no more than 30 CFUN/power operations
-# per day to preserve flash lifespan. This counter enforces a limit of 15
-# invocations per 86400s window (monotonic uptime-based, immune to NTP).
+# per day to preserve flash lifespan. This counter enforces a limit of 14
+# AT+CFUN operations (default, see cfun_daily_max; one modem restart uses 2)
+# per 86400s window (monotonic uptime-based, immune to NTP).
 atcmd_cfun_file="/tmp/watchdog/atcmd_cfun_count"
 atcmd_cfun_window_file="/tmp/watchdog/atcmd_cfun_window_start"
-atcmd_cfun_max=15
+atcmd_cfun_max=14
+
+# Optional overrides from the shared watchdog config (runtime copy first, then
+# flash). Only these four values are imported: the config is read in a
+# subshell, so no other variable of the config can leak into this script.
+# No config, or a missing/empty variable = the defaults above stay in force.
+cfg_file=""
+for _conf in /tmp/watchdog/mbim.conf /etc/watchdog_mbim.conf; do
+    [ -r "$_conf" ] || continue
+    cfg_file="$_conf"
+    eval "$( ( . "$_conf" >/dev/null 2>&1
+        for _v in ttyport cfun_daily_max iface ping_targets; do
+            eval "_x=\${$_v-}"
+            [ -n "$_x" ] && printf "cfg_%s='%s'\n" "$_v" "$_x"
+        done ) )"
+    break
+done
+ttyport_src="default"; wan_iface_src="default"; ping_servers_src="default"; atcmd_cfun_max_src="default"
+[ -n "$cfg_ttyport" ]      && { ttyport="$cfg_ttyport"; ttyport_src="conf"; }
+[ -n "$cfg_iface" ]        && { wan_iface="$cfg_iface"; wan_iface_src="conf"; }
+[ -n "$cfg_ping_targets" ]  && { ping_servers="$cfg_ping_targets"; ping_servers_src="conf"; }
+case "$cfg_cfun_daily_max" in
+    '')        ;;
+    *[!0-9]*)  atcmd_cfun_max_src="default(bad)" ;;
+    *)         atcmd_cfun_max="$cfg_cfun_daily_max"; atcmd_cfun_max_src="conf" ;;
+esac
 
 # Atomic lock directory replaces pidfile to avoid race condition.
 # mkdir is atomic even on busybox/tmpfs.
@@ -141,6 +169,40 @@ sanitize_at_command() {
     return 0
 }
 
+# Print the configuration used by atcmd and where each value comes from (option -c).
+# Read-only: it does not touch the modem, the AT port, the lock or the block files.
+show_config_report() {
+    echo "=== atcmd configuration ==="
+    echo "  config in use: ${cfg_file:-<none: built-in defaults>}"
+    echo "  (read from the config: ttyport, iface, ping_targets, cfun_daily_max)"
+    echo ""
+    printf '  %-24s %-12s %s\n' "VARIABLE" "SOURCE" "VALUE"
+    echo "  -- imported from the config"
+    printf '  %-24s %-12s %s\n' ttyport        "$ttyport_src"        "$ttyport"
+    printf '  %-24s %-12s %s\n' wan_iface      "$wan_iface_src"      "$wan_iface"
+    printf '  %-24s %-12s %s\n' ping_servers   "$ping_servers_src"   "$ping_servers"
+    printf '  %-24s %-12s %s\n' atcmd_cfun_max "$atcmd_cfun_max_src" "$atcmd_cfun_max"
+    echo "  -- fixed in the script (not configurable)"
+    printf '  %-24s %-12s %s\n' logheader                "script" "$logheader"
+    printf '  %-24s %-12s %s\n' atcmd_dir                "script" "$atcmd_dir"
+    printf '  %-24s %-12s %s\n' usage_file               "script" "$usage_file"
+    printf '  %-24s %-12s %s\n' lockdir                  "script" "$show_lockdir"
+    printf '  %-24s %-12s %s\n' watchdog_block_file      "script" "$watchdog_block_file"
+    printf '  %-24s %-12s %s\n' atcmd_block_file         "script" "$atcmd_block_file"
+    printf '  %-24s %-12s %s\n' atcmd_cfun_file          "script" "$atcmd_cfun_file"
+    printf '  %-24s %-12s %s\n' atcmd_cfun_window_file   "script" "$atcmd_cfun_window_file"
+    printf '  %-24s %-12s %s\n' delaytime                "script" "$delaytime"
+    printf '  %-24s %-12s %s\n' ttyport_timeout          "script" "$ttyport_timeout"
+    printf '  %-24s %-12s %s\n' sleep_interval           "script" "$sleep_interval"
+    printf '  %-24s %-12s %s\n' max_retries              "script" "$max_retries"
+    printf '  %-24s %-12s %s\n' interval_between_retries "script" "$interval_between_retries"
+    printf '  %-24s %-12s %s\n' wait_after_ifup          "script" "$wait_after_ifup"
+    printf '  %-24s %-12s %s\n' ping_count               "script" "$ping_count"
+    printf '  %-24s %-12s %s\n' ping_interval            "script" "$ping_interval"
+    echo ""
+    echo "  wan_device (L2 device) is resolved at run time from wan_iface via ubus."
+}
+
 # Cleanup function
 # shellcheck disable=SC2329
 cleanup() {
@@ -216,14 +278,17 @@ while [ $# -gt 0 ]; do
         -C|--smart-cfun)
             smart_cfun=1
             ;;
-        -D|--pre-escalation-diag)
-            pre_escalation_diag=1
+        -D|--at-diag)
+            at_diag=1
             ;;
         -S|--smart-qnwlock)
             smart_qnwlock=1
             ;;
         -Z|--sanity-check)
             sanity_check=1
+            ;;
+        -c|--show-config)
+            show_config=1
             ;;
         -h|-help|--help|help)
             usage
@@ -262,13 +327,27 @@ while [ $# -gt 0 ]; do
 done
 
 # -C, -D, -S, and  -Z are mutually exclusive: only one smart mode can run per invocation.
-smart_flags_count=$((smart_qnwlock + smart_cfun + sanity_check + pre_escalation_diag))
+smart_flags_count=$((smart_qnwlock + smart_cfun + sanity_check + at_diag))
 if [ "$smart_flags_count" -gt 1 ]; then
-    echo "ERROR: -S/--smart-qnwlock, -C/--smart-cfun, -Z/--sanity-check and -D/--pre-escalation-diag are mutually exclusive. Use only one per invocation."
+    echo "ERROR: -S/--smart-qnwlock, -C/--smart-cfun, -Z/--sanity-check and -D/--at-diag are mutually exclusive. Use only one per invocation."
     exit 1
 fi
 
-# Satitize_at_command
+# -c / --show-config: print the configuration in use and exit. Read-only, so it is
+# handled before any check of tools, AT port or locks. lockdir is cleared so that the
+# exit trap (cleanup) cannot remove the lock of another atcmd that is running.
+if [ "$show_config" -eq 1 ]; then
+    show_lockdir="$lockdir"
+    lockdir=""
+    if [ "$smart_flags_count" -gt 0 ] || [ -n "$atcommand" ]; then
+        echo "ERROR: -c/--show-config cannot be combined with other actions (note: -c is read-only, -C restarts the modem)"
+        exit 1
+    fi
+    show_config_report
+    exit 0
+fi
+
+# Sanitize_at_command
 if [ -n "$atcommand" ]; then
     sanitize_at_command "$atcommand" || exit 1
 fi
@@ -335,9 +414,8 @@ if [ "$internal_watchdog" -ne 1 ]; then
         exit 20
     fi
 else
-    # watchdog interno: bypass lock
+    # internal watchdog mode: bypass lock
     logger -t "$logheader" "Watchdog mode: skipping atomic lock"
-    echo "Watchdog mode: skipping atomic lock"
 fi
 
 # Check if $atcmd_dir directory exists, if not, create it
@@ -354,18 +432,65 @@ if [ "$lteproto" -ne 0 ]; then
 fi
 
 # Check that wan_iface exists and resolve its L2 device via ubus.
-wan_device=$(ubus call network.interface."$wan_iface" status 2>/dev/null | \
-    jsonfilter -e '@.l3_device')
-if [ -z "$wan_device" ]; then
-    echo "Error: interface \"$wan_iface\" not found or not yet created."
-    echo "Check that \"$wan_iface\" exists in /etc/config/network and that the network service is running."
-    echo "Alternatively, edit this script and set the variable wan_iface to match your network configuration."
-    echo "Run 'ubus list network.interface.*' to see all available interfaces."
-    exit 5
+# Skip this gate for AT+CFUN=* commands: radio on/off state is exactly what
+# determines whether l3_device exists, so this check must not block CFUN
+# toggling in either direction.
+# Skip also for -C (smart_cfun) and -S (smart_qnwlock): these procedures
+# internally manage WAN restart via restart_wan() which already waits for
+# l3_device to be assigned after wan up. Blocking them here on a pending
+# wan state would cause rc=5 precisely in the scenarios (e.g. storm
+# detection firing mid-recovery) where a CFUN reset is most needed.
+if [ "$smart_cfun" -eq 1 ] || [ "$smart_qnwlock" -eq 1 ] || [ "$at_diag" -eq 1 ]; then
+    # (-D / at_diag also skips the gate: the diagnostics snapshot only uses AT queries
+    # and is run by watchdog_mbim precisely when wan is pending/down.)
+    # wan_device intentionally left empty: restart_wan() resolves it
+    # internally after WAN is cycled and updates wan_device accordingly.
+    wan_device=""
+    logger -t "$logheader" "wan interface check skipped (smart_cfun=$smart_cfun smart_qnwlock=$smart_qnwlock at_diag=$at_diag)"
+else
+    case "$atcommand" in
+        AT+CFUN=*)
+            watchdog_mbim_pid=$(cat /var/run/watchdog_mbim.pid 2>/dev/null)
+            if [ -n "$watchdog_mbim_pid" ] && kill -0 "$watchdog_mbim_pid" 2>/dev/null; then
+                echo "ERROR: watchdog_mbim is currently RUNNING (pid $watchdog_mbim_pid)."
+                echo "ERROR: manual $atcommand via -a is not coordinated with watchdog_mbim's recovery logic."
+                echo "ERROR: watchdog_mbim could react concurrently (safe_ifup) while the radio is off, block the"
+                echo "       next atcmd invocation via atcmd_block, and leave WAN down until watchdog_mbim is stopped."
+                echo "ERROR: stop watchdog_mbim first, then repeat this command."
+                logger -t "$logheader" "BLOCKED: manual $atcommand refused via -a while watchdog_mbim is running (pid $watchdog_mbim_pid) - stop watchdog_mbim first"
+                exit 21
+            fi
+            wan_device=""
+            echo "WARNING: sending $atcommand directly bypasses the WAN interface check."
+            echo "WARNING: WAN may need a manual 'ifdown wan; ifup wan' afterwards"
+            echo "         (IP/PDP context may not renegotiate automatically after a radio power cycle)."
+            logger -t "$logheader" "WARNING: manual $atcommand issued via -a with watchdog_mbim stopped; WAN may require manual ifdown/ifup afterwards"
+            ;;
+        AT+CGATT=1|AT+CGATT\?|AT+CEREG\?|AT+CPIN\?|AT+COPS\?|AT+COPS=0)
+            # Re-attach and read-only queries must work while wan is pending/down
+            # (l3_device empty): that is exactly when they are needed. AT+CGATT=0 is
+            # intentionally NOT listed here and stays behind the wan check.
+            # AT+COPS? and AT+COPS=0 (restore automatic selection after AT+COPS=2) are allowed too;
+            # no other COPS write is.
+            wan_device=""
+            logger -t "$logheader" "wan interface check skipped for $atcommand"
+            ;;
+        *)
+            wan_device=$(ubus call network.interface."$wan_iface" status 2>/dev/null | \
+                jsonfilter -e '@.l3_device')
+            if [ -z "$wan_device" ]; then
+                echo "Error: interface \"$wan_iface\" not found or not yet created."
+                echo "Check that \"$wan_iface\" exists in /etc/config/network and that the network service is running."
+                echo "Alternatively, edit this script and set the variable wan_iface to match your network configuration."
+                echo "Run 'ubus list network.interface.*' to see all available interfaces."
+                logger -t "$logheader" "ERROR: interface \"$wan_iface\" not found or not yet created (l3_device empty)"
+                exit 5
+            fi
+            ;;
+    esac
 fi
 
 # Check if atcmd is blocked by watchdog_mbim
-atcmd_block_file="/tmp/watchdog/atcmd_block"
 if [ -f "$atcmd_block_file" ] && [ "$internal_watchdog" -ne 1 ]; then
     echo "I can't give at commands, the file $atcmd_block_file exists"
     logger -t "$logheader" "Blocked: $atcmd_block_file exists, command not executed"
@@ -373,7 +498,6 @@ if [ -f "$atcmd_block_file" ] && [ "$internal_watchdog" -ne 1 ]; then
 fi
 if [ "$internal_watchdog" -eq 1 ]; then
     logger -t "$logheader" "Internal watchdog mode enabled"
-    nologger=1
 fi
 
 # Validate delaytime: must be numeric and > 0
@@ -389,7 +513,7 @@ if [ "$delaytime" -le 0 ]; then
 fi
 
 # Validation: an AT command is required UNLESS smart mode is active
-if [ -z "$atcommand" ] && [ "$smart_cfun" -ne 1 ] && [ "$smart_qnwlock" -ne 1 ] && [ "$sanity_check" -ne 1 ] && [ "$pre_escalation_diag" -ne 1 ]; then
+if [ -z "$atcommand" ] && [ "$smart_cfun" -ne 1 ] && [ "$smart_qnwlock" -ne 1 ] && [ "$sanity_check" -ne 1 ] && [ "$at_diag" -ne 1 ]; then
     echo "ERROR: No AT command provided and no Smart Mode enabled."
     echo "Usage: $0 [AT_COMMAND] or use -C / -D / -S / -Z flags."
     echo
@@ -404,6 +528,7 @@ fi
 # validate savefile path
 if [ -n "$savefile" ]; then
     case "$savefile" in
+        */../*|*/..) echo "ERROR: output file $savefile must not contain '..'"; exit 8 ;;
         "$atcmd_dir"*) ;;
         *) echo "ERROR: output file $savefile must be inside $atcmd_dir"; exit 8 ;;
     esac
@@ -574,9 +699,11 @@ restart_modem() {
     send_at "AT+CFUN=0" || true
     sleep 3
 
+    # AT+CFUN=0 has already been sent: AT+CFUN=1 must go out even if the daily
+    # limit is reached now (e.g. odd cfun_daily_max), otherwise the radio would
+    # stay OFF. In that case it is sent but not counted (counter stays at max).
     if ! count_cfun_op; then
-        log "ERROR: daily CFUN limit reached, modem left in CFUN=0 (radio OFF)"
-        return 1
+        log "WARNING: daily CFUN limit reached after AT+CFUN=0, sending AT+CFUN=1 anyway to restore the radio"
     fi
     log "Send: \"AT+CFUN=1\" (Radio ON)..."
     send_at "AT+CFUN=1" || true
@@ -594,8 +721,36 @@ restart_wan() {
     sleep 3
     log "Send: \"ubus call network.interface.$iface up\"..."
     ubus call network.interface.$iface up >/dev/null 2>&1
-    log "Waiting ($wait_after_ifup)sec..."
-    sleep "$wait_after_ifup"
+
+    # Poll for the interface to actually come back up (l3_device assigned)
+    # instead of blindly sleeping the full wait_after_ifup - a fixed sleep
+    # inflates recovery-time measurements (see forum GPIO reset discussion)
+    # and either wastes time when netifd reattaches faster, or leaves too
+    # little margin when it's slower. wait_after_ifup is now a MAX timeout,
+    # not a fixed wait.
+    log "Waiting up to ${wait_after_ifup}s for $iface to come up..."
+    wan_wait_start=$(get_uptime_sec)
+    while true; do
+        wan_l3=$(ubus call network.interface."$iface" status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+        [ -n "$wan_l3" ] && break
+        wan_now=$(get_uptime_sec)
+        if [ $(( ${wan_now:-0} - ${wan_wait_start:-0} )) -ge "$wait_after_ifup" ]; then
+            log "restart_wan: timeout waiting for $iface l3_device after ${wait_after_ifup}s"
+            break
+        fi
+        sleep 2
+    done
+
+    # Update the global wan_device with the resolved l3_device so that
+    # check_lte_connection() has a valid interface name even when the
+    # startup wan check was skipped (smart_cfun / smart_qnwlock path,
+    # where wan_device is intentionally left empty at entry).
+    if [ -n "$wan_l3" ]; then
+        wan_device="$wan_l3"
+        logger -t "$logheader" "restart_wan: wan_device resolved to $wan_device"
+    else
+        logger -t "$logheader" "restart_wan: wan_device could not be resolved (l3_device empty after timeout)"
+    fi
 }
 
 # Check LTE connectivity
@@ -770,6 +925,7 @@ load_cfun_state() {
     else
         atcmd_cfun_window_start=$now_up
         echo "$atcmd_cfun_window_start" > "$atcmd_cfun_window_file"
+        log "atcmd CFUN daily window started (window_start=${atcmd_cfun_window_start}s uptime, length=86400s)"
     fi
     case "${atcmd_cfun_window_start:-}" in
         ''|*[!0-9]*) atcmd_cfun_window_start=$now_up ;;
@@ -816,7 +972,8 @@ count_cfun_op() {
     # Increment counter
     atcmd_cfun_count=$(( atcmd_cfun_count + 1 ))
     echo "$atcmd_cfun_count" > "$atcmd_cfun_file"
-    log "atcmd CFUN operation $atcmd_cfun_count/$atcmd_cfun_max"
+    cfun_win_rem=$(( 86400 - ( ${now_up:-0} - ${atcmd_cfun_window_start:-0} ) ))
+    log "atcmd CFUN operation $atcmd_cfun_count/$atcmd_cfun_max (window_start=${atcmd_cfun_window_start}s uptime, remaining=${cfun_win_rem}s)"
     return 0
 }
 
@@ -918,32 +1075,34 @@ smart_restart_procedure() {
     unblock_watchdog
 }
 
-# Pre-escalation AT diagnostics: query critical modem state before recovery attempts
+# AT diagnostics snapshot: query critical modem state on demand
 # Captures: registration status, GPRS attachment, IMSI, APN/PDP address
-# This is read-only; does NOT modify any modem state. Used to log diagnostics
-# at the moment of escalation decision, aiding troubleshooting.
+# This is read-only; does NOT modify any modem state. Can be invoked at any
+# point to snapshot key modem AT state; used both pre-escalation (decision
+# support) and post-recovery (timing measurement), aiding troubleshooting.
 # Returns 0 on successful queries, 1 if any critical query fails.
-pre_escalation_at_diagnostics() {
-    local diag_timeout=120
+at_diagnostics() {
+    # NOTE: this is a delay in milliseconds (picocom --exit-after via send_at), not seconds.
+    local diag_timeout=300
     local diag_rc=0
 
-    log "pre-escalation: executing AT diagnostics..."
+    log "at-diag: executing AT diagnostics..."
 
     # Query 1: AT+CEREG? (registration status)
     # Response format: +CEREG: <n>,<stat>[,<lac>,<ci>[,<AcT>]]
     # <stat>: 0=not registered, 1=home, 2=searching, 3=denied, 5=roaming
-    atcmd_cereg_file=$(mktemp) || { log "pre-escalation: AT+CEREG mktemp failed"; return 1; }
+    atcmd_cereg_file=$(mktemp) || { log "at-diag: AT+CEREG mktemp failed"; return 1; }
     send_at "AT+CEREG?" "$diag_timeout" "$atcmd_cereg_file" 2>/dev/null
     if [ -s "$atcmd_cereg_file" ]; then
         cereg_result=$(grep "^+CEREG:" "$atcmd_cereg_file" | head -1)
         if [ -n "$cereg_result" ]; then
-            log "pre-escalation: $cereg_result"
+            log "at-diag: $cereg_result"
         else
-            log "pre-escalation: AT+CEREG? query FAILED or no response"
+            log "at-diag: AT+CEREG? query FAILED or no response"
             diag_rc=1
         fi
     else
-        log "pre-escalation: AT+CEREG? timeout or device unreachable"
+        log "at-diag: AT+CEREG? timeout or device unreachable"
         diag_rc=1
     fi
     rm -f "$atcmd_cereg_file"
@@ -952,17 +1111,17 @@ pre_escalation_at_diagnostics() {
     # Query 2: AT+CGATT? (GPRS attachment status)
     # Response format: +CGATT: <stat>
     # <stat>: 0=detached, 1=attached
-    atcmd_cgatt_file=$(mktemp) || { log "pre-escalation: AT+CGATT mktemp failed"; return 1; }
+    atcmd_cgatt_file=$(mktemp) || { log "at-diag: AT+CGATT mktemp failed"; return 1; }
     send_at "AT+CGATT?" "$diag_timeout" "$atcmd_cgatt_file" 2>/dev/null
     if [ -s "$atcmd_cgatt_file" ]; then
         cgatt_result=$(grep "^+CGATT:" "$atcmd_cgatt_file" | head -1)
         if [ -n "$cgatt_result" ]; then
-            log "pre-escalation: $cgatt_result"
+            log "at-diag: $cgatt_result"
         else
-            log "pre-escalation: AT+CGATT? query FAILED or no response"
+            log "at-diag: AT+CGATT? query FAILED or no response"
         fi
     else
-        log "pre-escalation: AT+CGATT? timeout"
+        log "at-diag: AT+CGATT? timeout"
     fi
     rm -f "$atcmd_cgatt_file"
     atcmd_cgatt_file=""
@@ -970,7 +1129,7 @@ pre_escalation_at_diagnostics() {
     # Query 3: AT+CIMI (IMSI - International Mobile Subscriber Identity)
     # Response format: IMSI as raw number (15 digits typically)
     # Presence of IMSI indicates SIM is recognized by modem
-    atcmd_cimi_file=$(mktemp) || { log "pre-escalation: AT+CIMI mktemp failed"; return 1; }
+    atcmd_cimi_file=$(mktemp) || { log "at-diag: AT+CIMI mktemp failed"; return 1; }
 
     nologger_saved=$nologger
     nologger=1
@@ -981,13 +1140,13 @@ pre_escalation_at_diagnostics() {
         cimi_result=$(tr '\r' '\n' < "$atcmd_cimi_file" | grep -oE '^[0-9]{10,15}$' | head -n 1)
         if [ -n "$cimi_result" ]; then
             # No log digits for privacy
-            log "pre-escalation: IMSI present (SIM recognized)"
+            log "at-diag: IMSI present (SIM recognized)"
         else
-            log "pre-escalation: AT+CIMI query FAILED - SIM may not be recognized"
+            log "at-diag: AT+CIMI query FAILED - SIM may not be recognized"
             diag_rc=1
         fi
     else
-        log "pre-escalation: AT+CIMI timeout"
+        log "at-diag: AT+CIMI timeout"
         diag_rc=1
     fi
     rm -f "$atcmd_cimi_file"
@@ -997,26 +1156,26 @@ pre_escalation_at_diagnostics() {
     # Response format: +CGPADDR: <cid>[,<PDP_addr_1>[,<PDP_addr_2>]]
     # <cid>: Context ID (usually 1), <PDP_addr>: IPv4 or IPv6 address
     # This shows if PDP context is active and has an IP assigned
-    atcmd_cgpaddr_file=$(mktemp) || { log "pre-escalation: AT+CGPADDR mktemp failed"; return 1; }
+    atcmd_cgpaddr_file=$(mktemp) || { log "at-diag: AT+CGPADDR mktemp failed"; return 1; }
     send_at "AT+CGPADDR=1" "$diag_timeout" "$atcmd_cgpaddr_file" 2>/dev/null
     if [ -s "$atcmd_cgpaddr_file" ]; then
         cgpaddr_result=$(grep "^+CGPADDR:" "$atcmd_cgpaddr_file" | head -1)
         if [ -n "$cgpaddr_result" ]; then
-            log "pre-escalation: $cgpaddr_result"
+            log "at-diag: $cgpaddr_result"
         else
-            log "pre-escalation: AT+CGPADDR? query FAILED - no PDP context"
+            log "at-diag: AT+CGPADDR? query FAILED - no PDP context"
         fi
     else
-        log "pre-escalation: AT+CGPADDR timeout"
+        log "at-diag: AT+CGPADDR timeout"
     fi
     rm -f "$atcmd_cgpaddr_file"
     atcmd_cgpaddr_file=""
 
     # Summary
     if [ "$diag_rc" -eq 0 ]; then
-        log "pre-escalation: AT diagnostics completed successfully"
+        log "at-diag: AT diagnostics completed successfully"
     else
-        log "pre-escalation: AT diagnostics INCOMPLETE (some queries failed)"
+        log "at-diag: AT diagnostics INCOMPLETE (some queries failed)"
     fi
 
     return "$diag_rc"
@@ -1036,25 +1195,26 @@ if [ "$smart_cfun" -eq 1 ]; then
     # which preserves them. Use atcmd -S if cell-lock removal is needed.
     if cfun_limit_reached; then
         log "atcmd -C daily CFUN limit already reached, aborting"
-        exit 11  # exit code specifico: limit reached
+        exit 11  # dedicated exit code: limit reached
     fi
     log "Executing SMART CFUN restart procedure..."
     smart_restart_procedure "SMART CFUN"
     exit 0
 fi
 
-# Pre-escalation diagnostics
+# AT diagnostics snapshot
 # Can be used independently OR with --internal-watchdog flag.
 # When used with --internal-watchdog, diagnostics are executed and logged
-# before watchdog proceeds with escalation decisions.
-if [ "$pre_escalation_diag" -eq 1 ]; then
+# on demand - either before an escalation decision or afterwards (e.g. for
+# timing measurement).
+if [ "$at_diag" -eq 1 ]; then
     if [ -n "$atcommand" ]; then
-        echo "Error: \"-D\" \"--pre-escalation-diag\" does not accept AT commands"
+        echo "Error: \"-D\" \"--at-diag\" does not accept AT commands"
         usage
         exit 1
     fi
-    log "Executing pre-escalation AT diagnostics..."
-    pre_escalation_at_diagnostics
+    log "Executing AT diagnostics snapshot..."
+    at_diagnostics
     exit $?
 fi
 
@@ -1080,10 +1240,30 @@ if [ "$smart_qnwlock" -eq 1 ]; then
             ;;
         AT+QNWLOCK=\"common/4g\",0)
             atcmd_qnwlock_file=$(mktemp) || { log "smart_qnwlock: mktemp failed"; exit 1; }
-            send_at 'AT+QNWLOCK="common/4g"' "$delaytime" "$atcmd_qnwlock_file"
-            celllock_status=$(grep -oE '\+QNWLOCK: "common/4g",[0-9]+' "$atcmd_qnwlock_file" | cut -d',' -f2)
+            # Query the lock state. No answer (port mute, ERROR, delay too short):
+            # retry once with a longer delay; if still empty the lock state is
+            # unknown, so nothing is sent and the command fails (exit 12).
+            atcmd_qnwlock_try=1
+            atcmd_qnwlock_delay="$delaytime"
+            celllock_status=""
+            while [ "$atcmd_qnwlock_try" -le 2 ]; do
+                : > "$atcmd_qnwlock_file"
+                send_at 'AT+QNWLOCK="common/4g"' "$atcmd_qnwlock_delay" "$atcmd_qnwlock_file"
+                celllock_status=$(grep -oE '\+QNWLOCK: "common/4g",[0-9]+' "$atcmd_qnwlock_file" | cut -d',' -f2)
+                [ -n "$celllock_status" ] && break
+                if [ "$atcmd_qnwlock_try" -eq 1 ]; then
+                    log "QNWLOCK query got no answer, retrying with a longer delay (1500 ms)"
+                fi
+                atcmd_qnwlock_try=$((atcmd_qnwlock_try + 1))
+                atcmd_qnwlock_delay=1500
+            done
             rm -f "$atcmd_qnwlock_file"
             atcmd_qnwlock_file=""
+
+            if [ -z "$celllock_status" ]; then
+                log "ERROR: QNWLOCK query got no answer after 2 attempts, lock state unknown, nothing sent (exit 12)"
+                exit 12
+            fi
 
             if echo "$celllock_status" | grep -qv '^0$'; then
                 log "Cell-locks detected; executing SMART QNWLOCK procedure"
